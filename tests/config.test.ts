@@ -173,7 +173,11 @@ describe("Enrollment", () => {
 		expect(calls).toHaveLength(1);
 		expect(calls[0]?.url).toBe("https://netignite.example.com/sub/api/v1/agents/enroll");
 		expect(calls[0]?.init?.method).toBe("POST");
-		expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({ enrollment_token: token, secret });
+		expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
+			enrollment_token: token,
+			secret,
+			kind: "linux",
+		});
 	});
 
 	test("an ESP32 token fails with a clear message", async () => {

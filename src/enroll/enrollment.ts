@@ -58,7 +58,12 @@ export class Enrollment {
 					Accept: "application/json",
 					"User-Agent": `${AppConstants.BINARY_NAME}/${AppConstants.version()}`,
 				},
-				body: JSON.stringify({ enrollment_token: enrollmentToken, secret }),
+				// With `kind`, the server refuses an ESP32's token (409) before using it up.
+				body: JSON.stringify({
+					enrollment_token: enrollmentToken,
+					secret,
+					kind: AppConstants.AGENT_KIND,
+				}),
 				signal: AbortSignal.timeout(Enrollment.TIMEOUT_MS),
 				// A redirect would turn the POST into a GET; tell the user the right URL instead.
 				redirect: "manual",
@@ -81,6 +86,12 @@ export class Enrollment {
 		if (response.status === 401) {
 			throw new EnrollmentError(
 				"The server rejected the enrollment token: it is unknown, already used or expired (tokens are valid for 15 minutes and work once). Create a new one in the dashboard.",
+			);
+		}
+		if (response.status === 409) {
+			throw new EnrollmentError(
+				`${message ?? "This enrollment token is for another kind of agent."} ` +
+					"The token is still valid for that agent. For this machine, create an agent of type Linux in the dashboard and use its command.",
 			);
 		}
 		if (response.status === 429) {
@@ -106,7 +117,7 @@ export class Enrollment {
 		if (result.kind === "esp32") {
 			throw new EnrollmentError(
 				`Agent ${result.agent_id} is an ESP32 agent, so this enrollment token is for an ESP32, not for this Linux machine. ` +
-					"The server already replaced that ESP32's credential: set it up again from the dashboard. " +
+					"This server doesn't check the agent kind before enrolling, so it already replaced that ESP32's credential: set it up again from the dashboard. " +
 					"For this machine, create an agent of type Linux in the dashboard and use its pair command.",
 			);
 		}
