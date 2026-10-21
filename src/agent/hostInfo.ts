@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { hostname, type NetworkInterfaceInfo, networkInterfaces, release, uptime } from "node:os";
 import { AgentProtocol } from "../protocol/agentProtocol";
+import type { SshKeys } from "../ssh/sshKeys";
 import { AppConstants } from "../utils/constants";
 
 /** What the agent tells the server about the machine (HELLO `info`, HOST_STATUS). */
@@ -78,13 +79,22 @@ export class HostInfo {
 		};
 	}
 
-	static async hello(wolEnabled: boolean): Promise<AgentProtocol.Hello> {
+	/**
+	 * `sshKeys`: the public keys when this agent logs in over SSH (Wake-on-LAN mode, keys, TLS);
+	 * they come with the `ssh.power` capability.
+	 */
+	static async hello(options: {
+		wol: boolean;
+		sshKeys: SshKeys.PublicKeys | null;
+	}): Promise<AgentProtocol.Hello> {
+		const ssh = options.wol && options.sshKeys !== null;
 		return {
 			protocol: AgentProtocol.VERSION,
 			kind: AppConstants.AGENT_KIND,
 			version: AppConstants.version(),
-			capabilities: AgentProtocol.capabilities(wolEnabled),
-			info: await HostInfo.collect(wolEnabled),
+			capabilities: AgentProtocol.capabilities({ wol: options.wol, ssh }),
+			info: await HostInfo.collect(options.wol),
+			...(ssh && options.sshKeys ? { ssh_keys: options.sshKeys } : {}),
 		};
 	}
 

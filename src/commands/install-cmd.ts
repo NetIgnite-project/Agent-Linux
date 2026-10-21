@@ -57,7 +57,14 @@ export class InstallCMD extends CLIBaseCommand<typeof ARGS> {
 
 		let wol = false;
 		try {
-			wol = (await AgentConfig.load(configPath)).wol.enabled;
+			const loaded = await AgentConfig.load(configPath);
+			wol = loaded.wol.enabled;
+			// Configs from before 1.0.0 have no SSH keys; the service can't write them itself.
+			const { config, created } = AgentConfig.withSshKeys(loaded);
+			if (created && !dryRun) {
+				await AgentConfig.save(configPath, config);
+				Logger.info("Created the agent's SSH keys (for shutdown and reboot of other devices).");
+			}
 		} catch (error) {
 			if (!dryRun) throw error;
 			Logger.warn(`${error instanceof Error ? error.message : error} (ignored for --dry-run)`);

@@ -6,90 +6,157 @@ import { Logger } from "../utils/logger";
 import { SshKeys } from "./sshKeys";
 
 /**
- * Logs in to devices on the network over SSH (Wake-on-LAN mode): `SSH_CHECK` and `SSH_EXEC`.
+ * Logs in to devices on the network over SSH with the agent's own keys (Wake-on-LAN mode):
+ * `SSH_CHECK` and `SSH_POWER`. No credentials come from the server; it only says where.
  *
- * - The host key is checked before any credential is sent. With an expected key, a different one
- *   ends the handshake (ssh2's `hostVerifier` returns false).
- * - `SSH_CHECK` authenticates and disconnects. It never opens a session or channel, so a forced
- *   command in `authorized_keys` (e.g. one that shuts the machine down) never runs.
- * - `SSH_EXEC` runs one of four fixed commands ({@link SshRemote.command}); nothing from the
+ * - The agent has one key for shutdown and one for reboot. The device allows each with a forced
+ *   command in authorized_keys, so a key can do exactly its action.
+ * - The host key is checked before a key is offered. With an expected key, a different one ends
+ *   the handshake (ssh2's `hostVerifier` returns false).
+ * - `SSH_CHECK` logs in with each key and disconnects. It never opens a session or channel, so the
+ *   forced commands never run.
+ * - `SSH_POWER` runs one of four fixed commands ({@link SshRemote.command}); nothing from the
  *   request ends up in it.
- * - Credentials live only as long as the request and are never logged.
- * - Every request is answered within {@link SshRemote.BUDGET_MS} (the server waits 10 s).
+ * - At most {@link SshRemote.MAX_LOGINS_PER_MINUTE} logins a minute, so a compromised server can't
+ *   use the agent to probe the network.
+ * - Every login is answered within {@link SshRemote.BUDGET_MS}.
  */
 export class SshRemote {
-	/** The whole request, connect to answer. */
+	/** One login, connect to answer. `SSH_CHECK` does two (the server waits 25 s). */
 	static readonly BUDGET_MS = 8000;
 	static readonly CONNECT_TIMEOUT_MS = 3000;
-	/** `SSH_EXEC`: how long to wait for the command's exit status (within the budget). */
+	/** `SSH_POWER`: how long to wait for the command's exit status (within the budget). */
 	static readonly EXEC_WAIT_MS = 5000;
-	/** How much of the command's error output goes into a failed `SSH_EXEC`'s answer. */
+	/** How much of the command's error output goes into a failed `SSH_POWER`'s answer. */
 	static readonly ERROR_OUTPUT_CHARS = 200;
 	/** Output kept per stream; the rest is read and dropped. */
 	static readonly OUTPUT_LIMIT_BYTES = 4096;
 	/** After disconnecting, the socket is destroyed if the device doesn't close it. */
 	static readonly CLOSE_GRACE_MS = 1000;
-	/** Keyboard-interactive rounds answered with the password before giving up. */
-	static readonly MAX_PROMPT_ROUNDS = 3;
+	/** SSH logins (one per connection) the agent makes per minute, at most. */
+	static readonly MAX_LOGINS_PER_MINUTE = 10;
 
-	constructor(private readonly options: SshRemote.Options = {}) {}
+	private readonly loginTimes: number[] = [];
+
+	constructor(
+		private readonly keys: SshKeys.PrivateKeys,
+		private readonly options: SshRemote.Options = {},
+	) {}
 
 	private get budgetMs() {
 		return this.options.budgetMs ?? SshRemote.BUDGET_MS;
 	}
 
-	/** The command for an action. The only commands `SSH_EXEC` ever runs. */
+	/** The command for an action. The only commands `SSH_POWER` ever runs. */
 	static command(action: SshRemote.Action, os: SshRemote.OS, sudo: boolean) {
 		if (os === "windows") return action === "shutdown" ? "shutdown /s /t 0" : "shutdown /r /t 0";
 		const command = action === "shutdown" ? "shutdown -h now" : "shutdown -r now";
 		return sudo ? `sudo -n ${command}` : command;
 	}
 
-	/** `SSH_CHECK`: connect, verify the host key, authenticate, disconnect. */
-	async check(request: AgentProtocol.SshCheckRequest): Promise<AgentProtocol.SshCheckResult> {
-		const target = SshRemote.describeTarget(request);
-		const login = await this.login(request, Date.now() + this.budgetMs);
-		const result = SshRemote.checkResult(login);
-		if (login.type === "ready") SshRemote.disconnect(login);
-		Logger.debug(`SSH check of ${target}: ${JSON.stringify(result)}`);
-		return result;
+	/** Takes `count` logins from the minute's budget, or says how long to wait. */
+	private reserve(count: number): string | null {
+		const now = (this.options.now ?? Date.now)();
+		while (this.loginTimes.length > 0 && now - (this.loginTimes[0] as number) >= 60_000) {
+			this.loginTimes.shift();
+		}
+		const limit = this.options.maxLoginsPerMinute ?? SshRemote.MAX_LOGINS_PER_MINUTE;
+		if (this.loginTimes.length + count > limit) {
+			const waitS = Math.ceil((60_000 - (now - (this.loginTimes[0] ?? now))) / 1000);
+			return `Too many SSH logins (at most ${limit} a minute); try again in ${waitS} s`;
+		}
+		for (let i = 0; i < count; i++) this.loginTimes.push(now);
+		return null;
 	}
 
-	static checkResult(login: SshRemote.Login): AgentProtocol.SshCheckResult {
-		switch (login.type) {
+	/** `SSH_CHECK`: for each key, connect, verify the host key, authenticate, disconnect. */
+	async check(request: AgentProtocol.SshCheckRequest): Promise<SshRemote.CheckOutcome> {
+		const limited = this.reserve(2);
+		if (limited) return { ok: false, error: limited };
+
+		const target = SshRemote.describeTarget(request);
+		const first = await this.login(request, "shutdown", Date.now() + this.budgetMs);
+		if (first.type === "ready") SshRemote.disconnect(first);
+
+		let result: AgentProtocol.SshCheckResult;
+		if (first.type !== "ready" && first.type !== "auth_failed") {
+			// Offline, another host key or not SSH: the second key would get the same answer.
+			result = SshRemote.checkResult(first, null);
+		} else {
+			const second = await this.login(
+				{ ...request, host_key: first.hostKey },
+				"reboot",
+				Date.now() + this.budgetMs,
+			);
+			if (second.type === "ready") SshRemote.disconnect(second);
+			result = SshRemote.checkResult(first, second);
+		}
+		Logger.debug(`SSH check of ${target}: ${JSON.stringify(result)}`);
+		return { ok: true, result };
+	}
+
+	/** Combines the shutdown key's login and the reboot key's into the answer. */
+	static checkResult(
+		shutdown: SshRemote.Login,
+		reboot: SshRemote.Login | null,
+	): AgentProtocol.SshCheckResult {
+		switch (shutdown.type) {
 			case "unreachable":
-				return login.error ? { online: false, error: login.error } : { online: false };
+				return shutdown.error ? { online: false, error: shutdown.error } : { online: false };
 			case "host_key_mismatch":
 				return {
 					online: true,
-					host_key: login.hostKey,
-					authenticated: false,
+					host_key: shutdown.hostKey,
+					shutdown: false,
+					reboot: false,
 					error: "host_key_mismatch",
 				};
-			case "auth_failed":
-				return { online: true, host_key: login.hostKey, authenticated: false, error: "auth_failed" };
 			case "failed":
 				return {
 					online: true,
-					...(login.hostKey ? { host_key: login.hostKey } : {}),
-					authenticated: false,
-					error: login.error,
+					...(shutdown.hostKey ? { host_key: shutdown.hostKey } : {}),
+					shutdown: false,
+					reboot: false,
+					error: shutdown.error,
 				};
-			case "ready":
-				return { online: true, host_key: login.hostKey, authenticated: true };
+			case "auth_failed":
+			case "ready": {
+				const accepted = reboot?.type === "ready";
+				return {
+					online: true,
+					host_key: shutdown.hostKey,
+					shutdown: shutdown.type === "ready",
+					reboot: accepted,
+					// The reboot key's login failed for another reason than the key (a timeout, the
+					// device changing its host key in between).
+					...(reboot && reboot.type !== "ready" && reboot.type !== "auth_failed"
+						? {
+								error:
+									reboot.type === "host_key_mismatch"
+										? "host_key_mismatch"
+										: reboot.type === "failed"
+											? reboot.error
+											: "The device stopped answering",
+							}
+						: {}),
+				};
+			}
 		}
 	}
 
-	/** `SSH_EXEC`: log in to the known host and run the fixed command. */
-	async exec(request: AgentProtocol.SshExecRequest): Promise<SshRemote.ExecResult> {
+	/** `SSH_POWER`: log in to the known host with the action's key and run the fixed command. */
+	async power(request: AgentProtocol.SshPowerRequest): Promise<SshRemote.PowerResult> {
+		const limited = this.reserve(1);
+		if (limited) return { ok: false, error: limited };
+
 		const deadline = Date.now() + this.budgetMs;
 		const command = SshRemote.command(request.action, request.os, request.sudo);
 		const target = SshRemote.describeTarget(request);
 
 		Logger.info(`SSH: ${request.action} requested by the server, running "${command}" on ${target}`);
-		const login = await this.login(request, deadline);
+		const login = await this.login(request, request.action, deadline);
 
-		let result: SshRemote.ExecResult;
+		let result: SshRemote.PowerResult;
 		switch (login.type) {
 			case "unreachable":
 				result = {
@@ -101,7 +168,7 @@ export class SshRemote {
 				result = { ok: false, error: "host key changed" };
 				break;
 			case "auth_failed":
-				result = { ok: false, error: "authentication failed" };
+				result = { ok: false, error: `the device didn't accept the agent's ${request.action} key` };
 				break;
 			case "failed":
 				result = { ok: false, error: login.error };
@@ -124,8 +191,12 @@ export class SshRemote {
 
 	// --- Login ------------------------------------------------------------------------------------
 
-	/** Connects, checks the host key and authenticates, all before `deadline`. */
-	private async login(target: SshRemote.Target, deadline: number): Promise<SshRemote.Login> {
+	/** Connects, checks the host key and authenticates with `key`, all before `deadline`. */
+	private async login(
+		target: SshRemote.Target,
+		key: SshKeys.Action,
+		deadline: number,
+	): Promise<SshRemote.Login> {
 		const connectTimeout = Math.min(
 			this.options.connectTimeoutMs ?? SshRemote.CONNECT_TIMEOUT_MS,
 			Math.max(0, deadline - Date.now()),
@@ -136,9 +207,8 @@ export class SshRemote {
 			connectTimeout,
 		);
 		if (!tcp.ok) return { type: "unreachable", error: tcp.error };
-		return await SshRemote.handshake(tcp.socket, target, deadline);
+		return await SshRemote.handshake(tcp.socket, target, this.keys[key], deadline);
 	}
-
 	/**
 	 * Opens the TCP connection. Refused, unreachable and timed out are all "unreachable"; only a
 	 * host name that doesn't resolve gets an `error`.
@@ -172,10 +242,11 @@ export class SshRemote {
 		});
 	}
 
-	/** Runs the SSH handshake and authentication on a connected socket. */
+	/** Runs the SSH handshake and authentication with `privateKey` on a connected socket. */
 	private static handshake(
 		socket: Socket,
 		target: SshRemote.Target,
+		privateKey: string,
 		deadline: number,
 	): Promise<SshRemote.Login> {
 		return new Promise((resolve) => {
@@ -246,7 +317,7 @@ export class SshRemote {
 						if (target.host_key && fingerprint !== target.host_key) mismatch = true;
 						return !mismatch;
 					},
-					authHandler: SshRemote.authHandler(target),
+					authHandler: SshRemote.authHandler(target.username, privateKey),
 				});
 			} catch (error) {
 				finish({ type: "failed", error: SshRemote.errorMessage(error) });
@@ -255,19 +326,11 @@ export class SshRemote {
 	}
 
 	/**
-	 * Which authentication methods to try, in order, skipping those the device doesn't offer:
-	 * `none` (to learn the methods), then `password` and `keyboard-interactive` (answering the
-	 * password) or `publickey`.
+	 * `none` (to learn the methods), then the agent's key if the device offers `publickey`. Never a
+	 * password: the agent has none.
 	 */
-	static authHandler(target: SshRemote.Target): AuthHandlerMiddleware {
-		const { username, auth } = target;
-		const methods: AnyAuthMethod[] =
-			auth.type === "password"
-				? [
-						{ type: "password", username, password: auth.password },
-						SshRemote.keyboardInteractive(username, auth.password),
-					]
-				: [{ type: "publickey", username, key: auth.private_key }];
+	static authHandler(username: string, privateKey: string): AuthHandlerMiddleware {
+		const methods: AnyAuthMethod[] = [{ type: "publickey", username, key: privateKey }];
 
 		let first = true;
 		return (methodsLeft, _partialSuccess, next) => {
@@ -288,23 +351,6 @@ export class SshRemote {
 		};
 	}
 
-	/** Answers the device's hidden prompts (`Password:`) with the password. */
-	private static keyboardInteractive(username: string, password: string): AnyAuthMethod {
-		let rounds = 0;
-		return {
-			type: "keyboard-interactive",
-			username,
-			prompt: (_name, _instructions, _lang, prompts, finish) => {
-				rounds++;
-				if (rounds > SshRemote.MAX_PROMPT_ROUNDS) {
-					finish(prompts.map(() => ""));
-					return;
-				}
-				finish(prompts.map((prompt) => (prompt.echo ? "" : password)));
-			},
-		};
-	}
-
 	private static isAuthFailure(error: Error & { level?: string; code?: unknown }) {
 		// ssh2 gives up ("All configured authentication methods failed"), or the device
 		// disconnects (OpenSSH: "Too many authentication failures").
@@ -315,7 +361,7 @@ export class SshRemote {
 		);
 	}
 
-	/** A short, single-line message for the answer. Never contains credentials. */
+	/** A short, single-line message for the answer. Never contains a key. */
 	static errorMessage(error: unknown) {
 		const message = error instanceof Error ? error.message : String(error);
 		return SshRemote.oneLine(message, SshRemote.ERROR_OUTPUT_CHARS) || "SSH error";
@@ -341,7 +387,7 @@ export class SshRemote {
 		login.socket.once("close", () => clearTimeout(timer));
 	}
 
-	// --- Exec -------------------------------------------------------------------------------------
+	// --- Power ------------------------------------------------------------------------------------
 
 	/**
 	 * Runs `command` and waits up to {@link SshRemote.EXEC_WAIT_MS} for its exit status:
@@ -356,7 +402,7 @@ export class SshRemote {
 		login: Extract<SshRemote.Login, { type: "ready" }>,
 		command: string,
 		deadline: number,
-	): Promise<SshRemote.ExecResult> {
+	): Promise<SshRemote.PowerResult> {
 		const { client } = login;
 		return new Promise((resolve) => {
 			let settled = false;
@@ -366,7 +412,7 @@ export class SshRemote {
 			const stdout = new SshRemote.Output();
 			const stderr = new SshRemote.Output();
 
-			const finish = (result: SshRemote.ExecResult) => {
+			const finish = (result: SshRemote.PowerResult) => {
 				if (settled) return;
 				settled = true;
 				clearTimeout(timer);
@@ -440,19 +486,22 @@ export class SshRemote {
 }
 
 export namespace SshRemote {
-	export type Action = AgentProtocol.SshExecRequest["action"];
-	export type OS = AgentProtocol.SshExecRequest["os"];
+	export type Action = AgentProtocol.SshPowerRequest["action"];
+	export type OS = AgentProtocol.SshPowerRequest["os"];
 
-	/** The connection fields `SSH_CHECK` and `SSH_EXEC` share. */
+	/** The connection fields `SSH_CHECK` and `SSH_POWER` share. */
 	export type Target = Pick<
 		AgentProtocol.SshCheckRequest,
-		"host" | "port" | "username" | "auth" | "host_key"
+		"host" | "port" | "username" | "host_key"
 	>;
 
 	export type Options = {
 		budgetMs?: number;
 		connectTimeoutMs?: number;
 		execWaitMs?: number;
+		maxLoginsPerMinute?: number;
+		/** Replaces `Date.now` for the login limit (tests). */
+		now?: () => number;
 		/** Replaces {@link SshRemote.tcpConnect} (tests). */
 		connect?: (host: string, port: number, timeoutMs: number) => Promise<TcpResult>;
 	};
@@ -466,7 +515,11 @@ export namespace SshRemote {
 		| { type: "failed"; error: string; hostKey?: string }
 		| { type: "ready"; client: Client; socket: Socket; hostKey: string };
 
-	export type ExecResult = { ok: true } | { ok: false; error: string };
+	export type CheckOutcome =
+		| { ok: true; result: AgentProtocol.SshCheckResult }
+		| { ok: false; error: string };
+
+	export type PowerResult = { ok: true } | { ok: false; error: string };
 
 	/** Keeps the first {@link SshRemote.OUTPUT_LIMIT_BYTES} of a stream. */
 	export class Output {

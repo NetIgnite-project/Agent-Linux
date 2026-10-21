@@ -24,8 +24,8 @@ export class RequestHandler {
 				return await this.hostControl(payload);
 			case "SSH_CHECK":
 				return await this.sshCheck(payload);
-			case "SSH_EXEC":
-				return await this.sshExec(payload);
+			case "SSH_POWER":
+				return await this.sshPower(payload);
 			default:
 				return { ok: false, err: `Unknown command ${cmd}` };
 		}
@@ -65,23 +65,34 @@ export class RequestHandler {
 		return { ok: true, p: { online } };
 	}
 
-	/** Credentials are checked here and handed to the SSH client; nothing logs them. */
-	private async sshCheck(payload: Record<string, unknown>): Promise<RequestHandler.Outcome> {
+	/** The SSH client, or why this agent doesn't log in over SSH. */
+	private sshClient(): RequestHandler.SshClient | RequestHandler.Outcome {
 		if (!this.options.wolEnabled) return this.wolDisabled();
+		if (!this.options.ssh) {
+			return { ok: false, err: this.options.sshUnavailable ?? "SSH isn't available on this agent" };
+		}
+		return this.options.ssh;
+	}
+
+	private async sshCheck(payload: Record<string, unknown>): Promise<RequestHandler.Outcome> {
+		const ssh = this.sshClient();
+		if ("ok" in ssh) return ssh;
 
 		const request = AgentProtocol.parseRequest(AgentProtocol.SshCheckRequest, payload);
 		if (!request.ok) return { ok: false, err: request.error };
 
-		return { ok: true, p: await this.options.ssh.check(request.data) };
+		const outcome = await ssh.check(request.data);
+		return outcome.ok ? { ok: true, p: outcome.result } : { ok: false, err: outcome.error };
 	}
 
-	private async sshExec(payload: Record<string, unknown>): Promise<RequestHandler.Outcome> {
-		if (!this.options.wolEnabled) return this.wolDisabled();
+	private async sshPower(payload: Record<string, unknown>): Promise<RequestHandler.Outcome> {
+		const ssh = this.sshClient();
+		if ("ok" in ssh) return ssh;
 
-		const request = AgentProtocol.parseRequest(AgentProtocol.SshExecRequest, payload);
+		const request = AgentProtocol.parseRequest(AgentProtocol.SshPowerRequest, payload);
 		if (!request.ok) return { ok: false, err: request.error };
 
-		const result = await this.options.ssh.exec(request.data);
+		const result = await ssh.power(request.data);
 		return result.ok ? { ok: true, p: {} } : { ok: false, err: result.error };
 	}
 
@@ -126,17 +137,21 @@ export class RequestHandler {
 
 export namespace RequestHandler {
 	export type Options = {
-		/** WAKE, STATUS, SSH_CHECK and SSH_EXEC are only answered in Wake-on-LAN mode. */
+		/** WAKE, STATUS, SSH_CHECK and SSH_POWER are only answered in Wake-on-LAN mode. */
 		wolEnabled: boolean;
 		statusProbe: Pick<StatusProbe, "check">;
 		wake: (mac: MacAddress, port: number) => Promise<void>;
-		ssh: Pick<SshRemote, "check" | "exec">;
+		/** Null without SSH keys or without TLS to the server; `sshUnavailable` says which. */
+		ssh: SshClient | null;
+		sshUnavailable?: string;
 		/** Null where host control isn't possible (not Linux). */
-		hostControl: HostControl.Executor | null;
+		hostControl: HostControl.Perform | null;
 		/** Asks whether host control is allowed right now (logind); null/undefined: don't ask. */
 		hostControlCheck?: HostControl.Check | null;
 		hostControlDelayMs?: number;
 	};
+
+	export type SshClient = Pick<SshRemote, "check" | "power">;
 
 	export type Outcome =
 		| {

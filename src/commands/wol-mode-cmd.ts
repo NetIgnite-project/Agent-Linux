@@ -56,7 +56,9 @@ export class WolModeCMD extends CLIBaseCommand<typeof ARGS> {
 
 		const root = Platform.isLinux() && Platform.isRoot();
 		const serviceUser = root ? await SystemFacts.userIds(AppConstants.SERVICE_USER) : null;
-		await AgentConfig.save(configPath, { ...config, wol: { enabled } }, { serviceUser });
+		// Wake-on-LAN mode can log in to other devices over SSH, with keys of its own.
+		const updated = enabled ? AgentConfig.withSshKeys(config).config : config;
+		await AgentConfig.save(configPath, { ...updated, wol: { enabled } }, { serviceUser });
 		Logger.info(`Wake-on-LAN mode is now ${enabled ? "on" : "off"}.`);
 
 		const installedConfig = root ? await SystemFacts.installedConfigPath() : null;

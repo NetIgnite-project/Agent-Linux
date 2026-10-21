@@ -1,11 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { utils } from "ssh2";
 import { AgentClient } from "../src/agent/agentClient";
 import type { HostControl } from "../src/agent/hostControl";
 import { RunCMD } from "../src/commands/run-cmd";
 import type { AgentConfig } from "../src/config/agentConfig";
 import { StatusProbe } from "../src/net/statusProbe";
-import { SshRemote } from "../src/ssh/sshRemote";
+import { SshKeys } from "../src/ssh/sshKeys";
 import { Logger } from "../src/utils/logger";
 import { FakeNetIgniteServer } from "./helpers/fake-server";
 import { ServerProtocol } from "./helpers/server-protocol";
@@ -77,7 +76,7 @@ describe("connecting", () => {
 		expect(frame.t === "evt" && ServerProtocol.HostStatus.safeParse(frame.p).success).toBe(true);
 	});
 
-	test("Wake-on-LAN mode adds the WOL capabilities, ssh among them", async () => {
+	test("Wake-on-LAN mode adds the WOL capabilities", async () => {
 		startAgent({ wol: true });
 		const hello = await (await server.waitForConnection(0)).hello();
 		expect(hello.capabilities).toEqual(
@@ -88,7 +87,6 @@ describe("connecting", () => {
 				"status.ip",
 				"status.host",
 				"status.tcp",
-				"ssh",
 			]),
 		);
 	});
@@ -266,14 +264,15 @@ describe("requests", () => {
 });
 
 describe("SSH requests", () => {
-	const clientKey = utils.generateKeyPairSync("ed25519");
+	const keys = SshKeys.generate(AGENT_ID);
+	const publicKeys = SshKeys.publicKeys(keys);
 	let ssh: TestSshServer;
 
 	beforeEach(async () => {
 		ssh = await new TestSshServer({
-			username: "admin",
-			password: "s3cret",
-			publicKeys: [clientKey.public],
+			username: "netignite",
+			publicKeys: [publicKeys.shutdown, publicKeys.reboot],
+			methods: ["publickey"],
 			exec: (command) =>
 				command.includes("-r")
 					? { exitCode: 1, stderr: "sudo: a password is required\n" }
@@ -286,114 +285,136 @@ describe("SSH requests", () => {
 	});
 
 	function target(overrides: Record<string, unknown> = {}) {
-		return {
-			host: "127.0.0.1",
-			port: ssh.port,
-			username: "admin",
-			auth: { type: "key", private_key: clientKey.private },
-			host_key: null,
-			...overrides,
-		};
+		return { host: "127.0.0.1", port: ssh.port, username: "netignite", host_key: null, ...overrides };
 	}
 
-	async function wolAgent() {
-		startAgent({ wol: true, ssh: new SshRemote() });
+	/** An agent in Wake-on-LAN mode with SSH keys; the fake server has no TLS, so tests allow that. */
+	async function sshAgent(
+		config: Partial<AgentConfig.Data> = {},
+		options: RunCMD.ClientOptions = {},
+	) {
+		const { tokenID, secret } = server.addCredential(AGENT_ID);
+		startAgent(
+			{ sshRequiresTls: false, ...options },
+			{ ...configFor(tokenID, secret), wol: { enabled: true }, ssh_keys: keys, ...config },
+		);
 		const connection = await server.waitForConnection(0);
-		await connection.hello();
-		return connection;
+		return { connection, hello: await connection.hello() };
 	}
+
+	test("HELLO offers ssh.power with the public keys, never the private ones", async () => {
+		const { connection, hello } = await sshAgent();
+		expect(hello.capabilities).toContain("ssh.power");
+		expect(hello.ssh_keys).toEqual(publicKeys);
+		const helloText = JSON.stringify(connection.frames.map((entry) => entry.frame));
+		expect(helloText).not.toContain("PRIVATE KEY");
+	});
 
 	test("SSH_CHECK: trust on first use, then a check against the stored key", async () => {
-		const connection = await wolAgent();
+		const { connection } = await sshAgent();
 
-		const first = await connection.request("SSH_CHECK", target(), 10_000);
+		const first = await connection.request("SSH_CHECK", target(), 25_000);
 		expect(first).toMatchObject({
 			ok: true,
-			p: { online: true, host_key: ssh.fingerprint, authenticated: true },
+			p: { online: true, host_key: ssh.fingerprint, shutdown: true, reboot: true },
 		});
 
 		const second = await connection.request(
 			"SSH_CHECK",
-			target({ host_key: first.p?.host_key, auth: { type: "password", password: "s3cret" } }),
-			10_000,
+			target({ host_key: first.p?.host_key }),
+			25_000,
 		);
-		expect(second.p).toEqual({ online: true, host_key: ssh.fingerprint, authenticated: true });
-		expect(second.elapsedMs).toBeLessThan(SshRemote.BUDGET_MS);
+		expect(second.p).toEqual({
+			online: true,
+			host_key: ssh.fingerprint,
+			shutdown: true,
+			reboot: true,
+		});
 
-		// The check logged in twice and never opened a session.
+		// Two logins per check and never a session.
+		expect(ssh.connections).toBe(4);
 		expect(ssh.sessions).toBe(0);
 		expect(ssh.execs).toEqual([]);
-		expect(connection.frames.every((entry) => entry.frame !== null)).toBe(true);
 	});
 
-	test("SSH_CHECK reports a changed host key and a wrong password", async () => {
-		const connection = await wolAgent();
-
+	test("SSH_CHECK reports a changed host key", async () => {
+		const { connection } = await sshAgent();
 		const mismatch = await connection.request(
 			"SSH_CHECK",
 			target({ host_key: `SHA256:${"B".repeat(43)}` }),
-			10_000,
+			25_000,
 		);
 		expect(mismatch.p).toEqual({
 			online: true,
 			host_key: ssh.fingerprint,
-			authenticated: false,
+			shutdown: false,
+			reboot: false,
 			error: "host_key_mismatch",
 		});
-
-		const wrong = await connection.request(
-			"SSH_CHECK",
-			target({ auth: { type: "password", password: "wrong" } }),
-			10_000,
-		);
-		expect(wrong.p).toEqual({
-			online: true,
-			host_key: ssh.fingerprint,
-			authenticated: false,
-			error: "auth_failed",
-		});
+		expect(ssh.authAttempts).toEqual([]);
 	});
 
-	test("SSH_EXEC runs the fixed command and reports failures", async () => {
-		const connection = await wolAgent();
-		const exec = (overrides: Record<string, unknown>) =>
+	test("SSH_POWER runs the fixed command and reports failures", async () => {
+		const { connection } = await sshAgent();
+		const power = (overrides: Record<string, unknown>) =>
 			connection.request(
-				"SSH_EXEC",
+				"SSH_POWER",
 				target({ host_key: ssh.fingerprint, os: "posix", sudo: true, ...overrides }),
-				10_000,
+				15_000,
 			);
 
-		expect(await exec({ action: "shutdown" })).toMatchObject({ ok: true, p: {} });
+		expect(await power({ action: "shutdown" })).toMatchObject({ ok: true, p: {} });
 
-		const reboot = await exec({ action: "reboot" });
+		const reboot = await power({ action: "reboot" });
 		expect(reboot.ok).toBe(false);
 		expect(reboot.err).toContain("sudo: a password is required");
 
-		expect(await exec({ action: "shutdown", host_key: null })).toMatchObject({
+		expect(await power({ action: "shutdown", host_key: null })).toMatchObject({
 			ok: false,
 			err: "Missing host key",
 		});
-		expect(await exec({ action: "shutdown", host_key: `SHA256:${"C".repeat(43)}` })).toMatchObject({
+		expect(await power({ action: "shutdown", host_key: `SHA256:${"C".repeat(43)}` })).toMatchObject({
 			ok: false,
 			err: "host key changed",
 		});
 		expect(ssh.execs).toEqual(["sudo -n shutdown -h now", "sudo -n shutdown -r now"]);
 	});
 
+	test("without TLS to the server: no ssh.power, no keys, and requests are refused", async () => {
+		const { connection, hello } = await sshAgent({}, { sshRequiresTls: true });
+		expect(hello.capabilities).not.toContain("ssh.power");
+		expect(hello.ssh_keys).toBeUndefined();
+		const check = await connection.request("SSH_CHECK", target());
+		expect(check).toMatchObject({
+			ok: false,
+			err: "SSH needs an https:// server address (the agent connects without TLS)",
+		});
+		expect(ssh.connections).toBe(0);
+	});
+
+	test("without SSH keys (a config from before 1.0.0): no ssh.power, and the error says what to do", async () => {
+		const { connection, hello } = await sshAgent({ ssh_keys: undefined });
+		expect(hello.capabilities).not.toContain("ssh.power");
+		const check = await connection.request("SSH_CHECK", target());
+		expect(check.ok).toBe(false);
+		expect(check.err).toContain("no SSH keys yet");
+		expect(check.err).toContain("install");
+		expect(ssh.connections).toBe(0);
+	});
+
 	test("outside Wake-on-LAN mode SSH requests are refused and nothing connects", async () => {
-		startAgent({ wol: false, ssh: new SshRemote() });
-		const connection = await server.waitForConnection(0);
-		const hello = await connection.hello();
-		expect(hello.capabilities).not.toContain("ssh");
+		const { connection, hello } = await sshAgent({ wol: { enabled: false } });
+		expect(hello.capabilities).not.toContain("ssh.power");
+		expect(hello.ssh_keys).toBeUndefined();
 
 		const check = await connection.request("SSH_CHECK", target());
-		const exec = await connection.request(
-			"SSH_EXEC",
+		const power = await connection.request(
+			"SSH_POWER",
 			target({ host_key: ssh.fingerprint, action: "shutdown", os: "posix", sudo: false }),
 		);
 		expect(check.ok).toBe(false);
 		expect(check.err).toContain("Wake-on-LAN mode is off");
-		expect(exec.ok).toBe(false);
+		expect(power.ok).toBe(false);
 		expect(ssh.connections).toBe(0);
 	});
 });

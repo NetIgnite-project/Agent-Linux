@@ -1,4 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { utils } from "ssh2";
 import type { AgentProtocol } from "../src/protocol/agentProtocol";
 import { SshKeys } from "../src/ssh/sshKeys";
@@ -8,15 +11,11 @@ import { closedPort, NotSshServer, TestSshServer } from "./helpers/ssh-server";
 
 Logger.setLogLevel("critical");
 
-const USER = "admin";
-const PASSWORD = "correct horse battery staple";
+const USER = "netignite";
 
-const keys = {
-	ed25519: utils.generateKeyPairSync("ed25519"),
-	ecdsa: utils.generateKeyPairSync("ecdsa", { bits: 256 }),
-	rsa: utils.generateKeyPairSync("rsa", { bits: 2048 }),
-	stranger: utils.generateKeyPairSync("ed25519"),
-};
+/** The agent's own keys, as `pair` creates them. */
+const agentKeys = SshKeys.generate(3);
+const publicKeys = SshKeys.publicKeys(agentKeys);
 
 /** A fingerprint no test server has. */
 const OTHER_HOST_KEY = `SHA256:${"A".repeat(43)}`;
@@ -28,46 +27,49 @@ afterEach(async () => {
 	servers = [];
 });
 
+/** An SSH server that accepts both agent keys (or the ones given) for {@link USER}. */
 async function startServer(options: Partial<TestSshServer.Options> = {}) {
 	const server = await new TestSshServer({
 		username: USER,
-		password: PASSWORD,
-		publicKeys: [keys.ed25519.public, keys.ecdsa.public, keys.rsa.public],
+		publicKeys: [publicKeys.shutdown, publicKeys.reboot],
+		methods: ["publickey"],
 		...options,
 	}).start();
 	servers.push(server);
 	return server;
 }
 
+function remote(options: SshRemote.Options = {}) {
+	return new SshRemote(agentKeys, { maxLoginsPerMinute: 1000, ...options });
+}
+
 function checkRequest(
 	port: number,
 	overrides: Partial<AgentProtocol.SshCheckRequest> = {},
 ): AgentProtocol.SshCheckRequest {
-	return {
-		host: "127.0.0.1",
-		port,
-		username: USER,
-		auth: { type: "password", password: PASSWORD },
-		host_key: null,
-		...overrides,
-	};
+	return { host: "127.0.0.1", port, username: USER, host_key: null, ...overrides };
 }
 
-function execRequest(
+function powerRequest(
 	server: TestSshServer,
-	overrides: Partial<AgentProtocol.SshExecRequest> = {},
-): AgentProtocol.SshExecRequest {
+	overrides: Partial<AgentProtocol.SshPowerRequest> = {},
+): AgentProtocol.SshPowerRequest {
 	return {
 		host: "127.0.0.1",
 		port: server.port,
 		username: USER,
-		auth: { type: "key", private_key: keys.ed25519.private },
 		host_key: server.fingerprint,
 		action: "shutdown",
 		os: "posix",
 		sudo: true,
 		...overrides,
 	};
+}
+
+async function check(ssh: SshRemote, request: AgentProtocol.SshCheckRequest) {
+	const outcome = await ssh.check(request);
+	if (!outcome.ok) throw new Error(`check refused: ${outcome.error}`);
+	return outcome.result;
 }
 
 /** Nothing but authentication happened: no session, channel or global request. */
@@ -113,19 +115,43 @@ describe("SshKeys", () => {
 		}
 	});
 
-	test("accepts unencrypted private keys only", () => {
-		expect(SshKeys.isUsablePrivateKey(keys.ed25519.private)).toBe(true);
-		expect(SshKeys.isUsablePrivateKey(keys.ecdsa.private)).toBe(true);
-		expect(SshKeys.isUsablePrivateKey(keys.rsa.private)).toBe(true);
-		expect(keys.ed25519.private).toStartWith("-----BEGIN OPENSSH PRIVATE KEY-----");
+	test("generate makes two different unencrypted Ed25519 keys", () => {
+		expect(agentKeys.shutdown).toStartWith("-----BEGIN OPENSSH PRIVATE KEY-----");
+		expect(agentKeys.shutdown).not.toBe(agentKeys.reboot);
+		expect(SshKeys.isUsablePrivateKey(agentKeys.shutdown)).toBe(true);
+		expect(SshKeys.isUsablePrivateKey(agentKeys.reboot)).toBe(true);
+		expect(publicKeys.shutdown).toMatch(/^ssh-ed25519 [A-Za-z0-9+/]{68}$/);
+		expect(publicKeys.shutdown).not.toBe(publicKeys.reboot);
+	});
 
+	test("the public key is what ssh-keygen derives from the private key", () => {
+		const keygen = Bun.which("ssh-keygen");
+		if (!keygen) return;
+		const dir = mkdtempSync(join(tmpdir(), "netignite-key-"));
+		try {
+			const file = join(dir, "id_ed25519");
+			writeFileSync(file, agentKeys.shutdown, { mode: 0o600 });
+			const derived = Bun.spawnSync([keygen, "-y", "-f", file]);
+			// Windows' ssh-keygen refuses files whose ACL other users could read.
+			if (derived.exitCode !== 0) return;
+			expect(derived.stdout.toString().trim()).toBe(
+				`${publicKeys.shutdown} netignite-agent-3-shutdown`,
+			);
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test("only unencrypted Ed25519 private keys are usable", () => {
+		const ecdsa = utils.generateKeyPairSync("ecdsa", { bits: 256 });
 		const encrypted = utils.generateKeyPairSync("ed25519", {
 			passphrase: "secret",
 			cipher: "aes256-cbc",
 			rounds: 2,
 		});
+		expect(SshKeys.isUsablePrivateKey(ecdsa.private)).toBe(false);
 		expect(SshKeys.isUsablePrivateKey(encrypted.private)).toBe(false);
-		expect(SshKeys.isUsablePrivateKey(keys.ed25519.public)).toBe(false);
+		expect(SshKeys.isUsablePrivateKey(publicKeys.shutdown)).toBe(false);
 		expect(SshKeys.isUsablePrivateKey("-----BEGIN OPENSSH PRIVATE KEY-----\nnope\n")).toBe(false);
 		expect(SshKeys.isUsablePrivateKey("")).toBe(false);
 		expect(SshKeys.isUsablePrivateKey("x".repeat(SshKeys.MAX_PRIVATE_KEY_LENGTH + 1))).toBe(false);
@@ -150,29 +176,30 @@ describe("SshRemote.command", () => {
 		}
 	});
 
-	test("the time limits fit the server's 10 s", () => {
-		expect(SshRemote.BUDGET_MS).toBeLessThanOrEqual(8000);
+	test("two logins fit the server's 25 s for a check, one its 15 s for a shutdown", () => {
+		expect(SshRemote.BUDGET_MS * 2).toBeLessThan(25_000);
+		expect(SshRemote.BUDGET_MS).toBeLessThan(15_000);
 		expect(SshRemote.CONNECT_TIMEOUT_MS).toBeLessThan(SshRemote.BUDGET_MS);
 		expect(SshRemote.EXEC_WAIT_MS).toBe(5000);
 	});
 });
 
 describe("SSH_CHECK", () => {
-	const remote = new SshRemote();
+	const ssh = remote();
 
 	test("connection refused: offline", async () => {
-		expect(await remote.check(checkRequest(await closedPort()))).toEqual({ online: false });
+		expect(await check(ssh, checkRequest(await closedPort()))).toEqual({ online: false });
 	});
 
 	test("connect timeout: offline, within the connect timeout", async () => {
-		const hanging = new SshRemote({
+		const hanging = remote({
 			connectTimeoutMs: 200,
 			// Like a SYN that never gets an answer.
 			connect: (_host, _port, timeoutMs) =>
 				new Promise((resolve) => setTimeout(() => resolve({ ok: false }), timeoutMs)),
 		});
 		const started = Date.now();
-		expect(await hanging.check(checkRequest(22))).toEqual({ online: false });
+		expect(await check(hanging, checkRequest(22))).toEqual({ online: false });
 		expect(Date.now() - started).toBeLessThan(1000);
 	});
 
@@ -185,120 +212,94 @@ describe("SSH_CHECK", () => {
 	});
 
 	test("a host name that doesn't resolve: offline, with an error", async () => {
-		const result = await remote.check(checkRequest(22, { host: "nonexistent.invalid" }));
+		const result = await check(ssh, checkRequest(22, { host: "nonexistent.invalid" }));
 		expect(result.online).toBe(false);
 		expect(result.error).toContain("doesn't resolve");
 	}, 10_000);
 
-	test("password: trust on first use reports the host key", async () => {
+	test("both keys accepted, trust on first use reports the host key, no session", async () => {
 		const server = await startServer();
-		expect(await remote.check(checkRequest(server.port))).toEqual({
+		expect(await check(ssh, checkRequest(server.port))).toEqual({
 			online: true,
 			host_key: server.fingerprint,
-			authenticated: true,
+			shutdown: true,
+			reboot: true,
+		});
+		// One connection per key.
+		expect(server.connections).toBe(2);
+		expectNoSession(server);
+	});
+
+	test("the expected host key: both keys tried", async () => {
+		const server = await startServer();
+		const result = await check(ssh, checkRequest(server.port, { host_key: server.fingerprint }));
+		expect(result).toEqual({
+			online: true,
+			host_key: server.fingerprint,
+			shutdown: true,
+			reboot: true,
 		});
 		expectNoSession(server);
 	});
 
-	test("the expected host key: logged in", async () => {
-		const server = await startServer();
-		expect(await remote.check(checkRequest(server.port, { host_key: server.fingerprint }))).toEqual({
+	test("only one key allowed: the check says which", async () => {
+		const server = await startServer({ publicKeys: [publicKeys.reboot] });
+		expect(await check(ssh, checkRequest(server.port))).toEqual({
 			online: true,
 			host_key: server.fingerprint,
-			authenticated: true,
+			shutdown: false,
+			reboot: true,
 		});
 		expectNoSession(server);
 	});
 
-	test("a different host key: mismatch, and no credentials were sent", async () => {
+	test("no key allowed, or another user: neither accepted", async () => {
+		const server = await startServer({ publicKeys: [] });
+		expect(await check(ssh, checkRequest(server.port))).toMatchObject({
+			shutdown: false,
+			reboot: false,
+		});
+		const other = await startServer();
+		expect(await check(ssh, checkRequest(other.port, { username: "root" }))).toMatchObject({
+			shutdown: false,
+			reboot: false,
+		});
+	});
+
+	test("a different host key: mismatch, and no key was offered", async () => {
 		const server = await startServer();
-		expect(await remote.check(checkRequest(server.port, { host_key: OTHER_HOST_KEY }))).toEqual({
+		expect(await check(ssh, checkRequest(server.port, { host_key: OTHER_HOST_KEY }))).toEqual({
 			online: true,
 			host_key: server.fingerprint,
-			authenticated: false,
+			shutdown: false,
+			reboot: false,
 			error: "host_key_mismatch",
 		});
 		expect(server.authAttempts).toEqual([]);
+		// The second key isn't tried against a device that failed the host key check.
+		expect(server.connections).toBe(1);
 		expectNoSession(server);
 	});
 
-	test("a wrong password: auth_failed", async () => {
-		const server = await startServer();
-		const result = await remote.check(
-			checkRequest(server.port, {
-				host_key: server.fingerprint,
-				auth: { type: "password", password: "wrong" },
-			}),
-		);
-		expect(result).toEqual({
-			online: true,
-			host_key: server.fingerprint,
-			authenticated: false,
-			error: "auth_failed",
+	test("a server that only takes passwords: no key offered, and never a password", async () => {
+		const server = await startServer({
+			methods: ["password", "keyboard-interactive"],
+			password: "pw",
 		});
-		expect(server.authAttempts.map((attempt) => attempt.method)).toContain("password");
-		expectNoSession(server);
-	});
-
-	test("a wrong user: auth_failed", async () => {
-		const server = await startServer();
-		const result = await remote.check(checkRequest(server.port, { username: "root" }));
-		expect(result.error).toBe("auth_failed");
-	});
-
-	for (const type of ["ed25519", "ecdsa", "rsa"] as const) {
-		test(`${type} key: logged in`, async () => {
-			const server = await startServer({ methods: ["publickey"] });
-			const result = await remote.check(
-				checkRequest(server.port, { auth: { type: "key", private_key: keys[type].private } }),
-			);
-			expect(result).toEqual({ online: true, host_key: server.fingerprint, authenticated: true });
-			expect(server.authAttempts.at(-1)?.method).toBe("publickey");
-			expectNoSession(server);
-		});
-	}
-
-	test("an unknown key: auth_failed", async () => {
-		const server = await startServer({ methods: ["publickey"] });
-		const result = await remote.check(
-			checkRequest(server.port, { auth: { type: "key", private_key: keys.stranger.private } }),
-		);
-		expect(result).toEqual({
-			online: true,
-			host_key: server.fingerprint,
-			authenticated: false,
-			error: "auth_failed",
-		});
-	});
-
-	test("a password only offered as keyboard-interactive still works", async () => {
-		const server = await startServer({ methods: ["keyboard-interactive"] });
-		expect((await remote.check(checkRequest(server.port))).authenticated).toBe(true);
-		// The method the server doesn't offer isn't tried.
-		expect(server.authAttempts.map((attempt) => attempt.method)).toEqual([
-			"none",
-			"keyboard-interactive",
-		]);
-		expectNoSession(server);
-	});
-
-	test("a key isn't offered to a server that only takes passwords", async () => {
-		const server = await startServer({ methods: ["password"] });
-		const result = await remote.check(
-			checkRequest(server.port, { auth: { type: "key", private_key: keys.ed25519.private } }),
-		);
-		expect(result.error).toBe("auth_failed");
-		expect(server.authAttempts.map((attempt) => attempt.method)).toEqual(["none"]);
+		const result = await check(ssh, checkRequest(server.port));
+		expect(result).toMatchObject({ online: true, shutdown: false, reboot: false });
+		expect(new Set(server.authAttempts.map((attempt) => attempt.method))).toEqual(new Set(["none"]));
 	});
 
 	test("not an SSH server, silent: online, with a timeout error, within the budget", async () => {
 		const server = await new NotSshServer("silent").start();
 		servers.push(server);
 		const started = Date.now();
-		const result = await new SshRemote({ budgetMs: 400 }).check(checkRequest(server.port));
+		const result = await check(remote({ budgetMs: 400 }), checkRequest(server.port));
 		expect(result).toEqual({
 			online: true,
-			authenticated: false,
+			shutdown: false,
+			reboot: false,
 			error: "SSH handshake timed out",
 		});
 		expect(Date.now() - started).toBeLessThan(1500);
@@ -307,9 +308,9 @@ describe("SSH_CHECK", () => {
 	test("not an SSH server, talking: online, with an error", async () => {
 		const server = await new NotSshServer("garbage").start();
 		servers.push(server);
-		const result = await remote.check(checkRequest(server.port));
+		const result = await check(ssh, checkRequest(server.port));
 		expect(result.online).toBe(true);
-		expect(result.authenticated).toBe(false);
+		expect(result.shutdown).toBe(false);
 		expect(result.host_key).toBeUndefined();
 		expect(result.error?.length).toBeGreaterThan(0);
 		expect(result.error?.length).toBeLessThanOrEqual(SshRemote.ERROR_OUTPUT_CHARS);
@@ -318,24 +319,24 @@ describe("SSH_CHECK", () => {
 	test("checks run concurrently and independently", async () => {
 		const server = await startServer();
 		const results = await Promise.all([
-			remote.check(checkRequest(server.port)),
-			remote.check(checkRequest(server.port, { auth: { type: "password", password: "no" } })),
-			remote.check(checkRequest(server.port, { host_key: OTHER_HOST_KEY })),
+			check(ssh, checkRequest(server.port)),
+			check(ssh, checkRequest(server.port, { username: "root" })),
+			check(ssh, checkRequest(server.port, { host_key: OTHER_HOST_KEY })),
 		]);
-		expect(results.map((result) => result.error ?? "ok")).toEqual([
-			"ok",
-			"auth_failed",
+		expect(results.map((result) => result.error ?? `${result.shutdown}`)).toEqual([
+			"true",
+			"false",
 			"host_key_mismatch",
 		]);
 		expectNoSession(server);
 	});
 });
 
-describe("SSH_EXEC", () => {
-	const remote = new SshRemote();
+describe("SSH_POWER", () => {
+	const ssh = remote();
 
 	test("runs exactly the fixed command for each action, OS and sudo flag", async () => {
-		const server = await startServer();
+		const server = await startServer({ exec: () => ({ exitCode: 0 }) });
 		const combinations: Array<[SshRemote.Action, SshRemote.OS, boolean]> = [
 			["shutdown", "posix", false],
 			["reboot", "posix", false],
@@ -346,7 +347,7 @@ describe("SSH_EXEC", () => {
 			["shutdown", "windows", true],
 		];
 		for (const [action, os, sudo] of combinations) {
-			expect(await remote.exec(execRequest(server, { action, os, sudo }))).toEqual({ ok: true });
+			expect(await ssh.power(powerRequest(server, { action, os, sudo }))).toEqual({ ok: true });
 		}
 		expect(server.execs).toEqual([
 			"shutdown -h now",
@@ -362,12 +363,14 @@ describe("SSH_EXEC", () => {
 		expect(server.otherRequests).toEqual([]);
 	});
 
-	test("with a password", async () => {
-		const server = await startServer();
-		const result = await remote.exec(
-			execRequest(server, { auth: { type: "password", password: PASSWORD }, action: "reboot" }),
-		);
-		expect(result).toEqual({ ok: true });
+	test("logs in with the action's key", async () => {
+		// The device only allows the reboot key.
+		const server = await startServer({ publicKeys: [publicKeys.reboot] });
+		expect(await ssh.power(powerRequest(server, { action: "shutdown" }))).toEqual({
+			ok: false,
+			error: "the device didn't accept the agent's shutdown key",
+		});
+		expect(await ssh.power(powerRequest(server, { action: "reboot" }))).toEqual({ ok: true });
 		expect(server.execs).toEqual(["sudo -n shutdown -r now"]);
 	});
 
@@ -375,7 +378,7 @@ describe("SSH_EXEC", () => {
 		const server = await startServer({
 			exec: () => ({ exitCode: 1, stderr: "sudo: a password is required\n" }),
 		});
-		const result = await remote.exec(execRequest(server));
+		const result = await ssh.power(powerRequest(server));
 		expect(result.ok).toBe(false);
 		if (result.ok) return;
 		expect(result.error).toContain("sudo: a password is required");
@@ -387,7 +390,7 @@ describe("SSH_EXEC", () => {
 		const server = await startServer({
 			exec: () => ({ exitCode: 5, stderr: `line one\r\nline two\t${"x".repeat(5000)}` }),
 		});
-		const result = await remote.exec(execRequest(server));
+		const result = await ssh.power(powerRequest(server));
 		if (result.ok) throw new Error("expected a failure");
 		expect(result.error).toContain("line one line two xxx");
 		const detail = result.error.slice(result.error.indexOf(": ") + 2);
@@ -399,7 +402,7 @@ describe("SSH_EXEC", () => {
 		const server = await startServer({
 			exec: () => ({ exitCode: 5, stdout: "Access is denied.(5)\r\n" }),
 		});
-		const result = await remote.exec(execRequest(server, { os: "windows" }));
+		const result = await ssh.power(powerRequest(server, { os: "windows" }));
 		expect(result).toEqual({
 			ok: false,
 			error: '"shutdown /s /t 0" failed with exit code 5: Access is denied.(5)',
@@ -409,7 +412,7 @@ describe("SSH_EXEC", () => {
 	test("the connection dropping before an exit status means the machine is going down", async () => {
 		for (const drop of ["disconnect", "reset"] as const) {
 			const server = await startServer({ exec: () => ({ drop }) });
-			expect(await remote.exec(execRequest(server))).toEqual({ ok: true });
+			expect(await ssh.power(powerRequest(server))).toEqual({ ok: true });
 			expect(server.execs).toEqual(["sudo -n shutdown -h now"]);
 		}
 	});
@@ -417,7 +420,7 @@ describe("SSH_EXEC", () => {
 	test("no exit status within the wait: the command is still running", async () => {
 		const server = await startServer({ exec: () => ({ hang: true }) });
 		const started = Date.now();
-		const result = await new SshRemote({ execWaitMs: 200 }).exec(execRequest(server));
+		const result = await remote({ execWaitMs: 200 }).power(powerRequest(server));
 		expect(result).toEqual({ ok: true });
 		expect(Date.now() - started).toBeLessThan(2000);
 	});
@@ -425,20 +428,20 @@ describe("SSH_EXEC", () => {
 	test("the wait for the exit status stays within the budget", async () => {
 		const server = await startServer({ exec: () => ({ hang: true }) });
 		const started = Date.now();
-		await new SshRemote({ budgetMs: 600, execWaitMs: 5000 }).exec(execRequest(server));
+		await remote({ budgetMs: 600, execWaitMs: 5000 }).power(powerRequest(server));
 		expect(Date.now() - started).toBeLessThan(1500);
 	});
 
 	test("a refused exec request fails", async () => {
 		const server = await startServer({ exec: () => ({ refuse: true }) });
-		const result = await remote.exec(execRequest(server));
+		const result = await ssh.power(powerRequest(server));
 		expect(result.ok).toBe(false);
 		if (!result.ok) expect(result.error).toContain("refused to run the command");
 	});
 
-	test("a changed host key: no credentials, no command", async () => {
+	test("a changed host key: no key offered, no command", async () => {
 		const server = await startServer();
-		expect(await remote.exec(execRequest(server, { host_key: OTHER_HOST_KEY }))).toEqual({
+		expect(await ssh.power(powerRequest(server, { host_key: OTHER_HOST_KEY }))).toEqual({
 			ok: false,
 			error: "host key changed",
 		});
@@ -446,27 +449,35 @@ describe("SSH_EXEC", () => {
 		expectNoSession(server);
 	});
 
-	test("wrong credentials: no command", async () => {
-		const server = await startServer();
-		expect(
-			await remote.exec(
-				execRequest(server, { auth: { type: "key", private_key: keys.stranger.private } }),
-			),
-		).toEqual({ ok: false, error: "authentication failed" });
-		expect(
-			await remote.exec(execRequest(server, { auth: { type: "password", password: "nope" } })),
-		).toEqual({ ok: false, error: "authentication failed" });
-		expectNoSession(server);
-	});
-
 	test("an unreachable host fails", async () => {
 		const port = await closedPort();
-		const result = await remote.exec({ ...execRequest(await startServer()), port });
+		const result = await ssh.power({ ...powerRequest(await startServer()), port });
 		expect(result).toEqual({ ok: false, error: `Couldn't connect to 127.0.0.1 port ${port}` });
 	});
 });
 
-describe("credentials stay out of the logs", () => {
+describe("login limit", () => {
+	test("at most 10 logins a minute: a check takes two, a shutdown one", async () => {
+		let now = 1_000_000;
+		const limited = new SshRemote(agentKeys, { now: () => now });
+		const server = await startServer();
+
+		for (let i = 0; i < 5; i++)
+			expect((await limited.check(checkRequest(server.port))).ok).toBe(true);
+		expect(await limited.check(checkRequest(server.port))).toEqual({
+			ok: false,
+			error: "Too many SSH logins (at most 10 a minute); try again in 60 s",
+		});
+		expect(await limited.power(powerRequest(server))).toMatchObject({ ok: false });
+		// Refused requests don't connect.
+		expect(server.connections).toBe(10);
+
+		now += 60_000;
+		expect(await limited.power(powerRequest(server, { action: "reboot" }))).toEqual({ ok: true });
+	});
+});
+
+describe("keys stay out of the logs", () => {
 	const lines: string[] = [];
 	const original = { ...console };
 
@@ -484,22 +495,20 @@ describe("credentials stay out of the logs", () => {
 		Logger.setLogLevel("critical");
 	});
 
-	test("neither the password nor the key appears in any log line", async () => {
+	test("no part of a private key appears in any log line", async () => {
 		const server = await startServer();
-		const remote = new SshRemote();
-		await remote.check(checkRequest(server.port));
-		await remote.check(checkRequest(server.port, { auth: { type: "password", password: "nope" } }));
-		await remote.exec(execRequest(server));
-		await remote.exec(
-			execRequest(server, { auth: { type: "password", password: PASSWORD }, sudo: false }),
-		);
+		const ssh = remote();
+		await ssh.check(checkRequest(server.port));
+		await ssh.check(checkRequest(server.port, { username: "root" }));
+		await ssh.power(powerRequest(server));
+		await ssh.power(powerRequest(server, { action: "reboot", sudo: false }));
 
 		expect(lines.length).toBeGreaterThan(0);
-		const keyBody = keys.ed25519.private.split("\n")[1] ?? "";
+		const keyLines = [agentKeys.shutdown, agentKeys.reboot].flatMap((key) =>
+			key.split("\n").filter((line) => line.length > 0 && !line.startsWith("-----")),
+		);
 		for (const line of lines) {
-			expect(line).not.toContain(PASSWORD);
-			expect(line).not.toContain("nope");
-			expect(line).not.toContain(keyBody);
+			for (const keyLine of keyLines) expect(line).not.toContain(keyLine);
 			expect(line).not.toContain("PRIVATE KEY");
 		}
 	});

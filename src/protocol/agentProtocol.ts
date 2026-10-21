@@ -28,22 +28,30 @@ export namespace AgentProtocol {
 
 	/** The agent runs on the machine it reports and controls (always on). */
 	export const HOST_CAPABILITIES = ["host.status", "host.control"] as const;
-	/**
-	 * Wake-on-LAN mode: wakes and checks other devices on the network, and logs in to them over
-	 * SSH (`SSH_CHECK`, `SSH_EXEC`).
-	 */
+	/** Wake-on-LAN mode: wakes and checks other devices on the network. */
 	export const WOL_CAPABILITIES = [
 		"wake",
 		"status.link_local",
 		"status.ip",
 		"status.host",
 		"status.tcp",
-		"ssh",
 	] as const;
-	export type Capability = (typeof HOST_CAPABILITIES)[number] | (typeof WOL_CAPABILITIES)[number];
+	/**
+	 * Wake-on-LAN mode with SSH keys and a TLS connection to the server: logs in to other devices
+	 * with the agent's own keys to shut them down or reboot them (`SSH_CHECK`, `SSH_POWER`).
+	 */
+	export const SSH_CAPABILITY = "ssh.power";
+	export type Capability =
+		| (typeof HOST_CAPABILITIES)[number]
+		| (typeof WOL_CAPABILITIES)[number]
+		| typeof SSH_CAPABILITY;
 
-	export function capabilities(wolEnabled: boolean): Capability[] {
-		return wolEnabled ? [...HOST_CAPABILITIES, ...WOL_CAPABILITIES] : [...HOST_CAPABILITIES];
+	export function capabilities(options: { wol: boolean; ssh: boolean }): Capability[] {
+		return [
+			...HOST_CAPABILITIES,
+			...(options.wol ? WOL_CAPABILITIES : []),
+			...(options.wol && options.ssh ? ([SSH_CAPABILITY] as const) : []),
+		];
 	}
 
 	const U32 = z.number().int().min(0).max(0xffffffff);
@@ -75,6 +83,8 @@ export namespace AgentProtocol {
 		version: z.string().min(1).max(64),
 		capabilities: z.array(z.string().max(64)).max(64),
 		info: z.record(z.string(), z.unknown()).optional(),
+		/** With `ssh.power`: the agent's public keys (`ssh-ed25519 <base64>`), one per action. */
+		ssh_keys: z.object({ shutdown: z.string(), reboot: z.string() }).optional(),
 	});
 	export type Hello = z.infer<typeof Hello>;
 
@@ -176,7 +186,7 @@ export namespace AgentProtocol {
 	export const HostControlRequest = z.object({ action: Action });
 	export type HostControlRequest = z.infer<typeof HostControlRequest>;
 
-	// --- SSH (Wake-on-LAN mode) -------------------------------------------------------------------
+	// --- SSH (Wake-on-LAN mode with keys, over TLS) ------------------------------------------------
 
 	/** An IP literal or a host name. */
 	const SshHost = z
@@ -194,71 +204,55 @@ export namespace AgentProtocol {
 		.max(255, "Invalid username")
 		.refine((value) => !/\p{Cc}/u.test(value), "Invalid username");
 
-	/** The credentials. Held for the request only; never logged or stored. */
-	const SshAuth = z.discriminatedUnion(
-		"type",
-		[
-			z.object({
-				type: z.literal("password"),
-				password: z.string({ error: "Invalid password" }).max(1024, "Invalid password"),
-			}),
-			z.object({
-				type: z.literal("key"),
-				private_key: z
-					.string({ error: "Invalid private key" })
-					.refine((key) => SshKeys.isUsablePrivateKey(key), "Invalid private key"),
-			}),
-		],
-		{ error: "Unknown auth type" },
-	);
-	export type SshAuth = z.infer<typeof SshAuth>;
-
 	/** `SHA256:<base64 without padding>`, like `ssh-keygen -lf`. */
 	const HostKey = z
 		.string({ error: (issue) => (issue.input == null ? "Missing host key" : "Invalid host key") })
 		.regex(SshKeys.FINGERPRINT_PATTERN, "Invalid host key");
 
+	/** Where to log in. No credentials: the agent logs in with its own key for the action. */
 	const SshTarget = {
 		host: SshHost,
 		port: Port,
 		username: SshUsername,
-		auth: SshAuth,
 	};
 
 	/**
-	 * Logs in and out again, without opening a session: is the device up, is it the one we know
-	 * (host key), do the credentials work? `host_key` null: trust on first use (the answer reports
-	 * the device's key).
+	 * Logs in with each of the agent's two keys and out again, without opening a session: is the
+	 * device up, is it the one we know (host key), which keys does it accept? `host_key` null:
+	 * trust on first use (the answer reports the device's key).
 	 */
 	export const SshCheckRequest = z.object({ ...SshTarget, host_key: HostKey.nullish() });
 	export type SshCheckRequest = z.infer<typeof SshCheckRequest>;
 
-	/** Logs in (only to a known host key) and runs the fixed shutdown or reboot command. */
-	export const SshExecRequest = z.object({
+	/**
+	 * Logs in with the action's key (only to a known host key) and requests the fixed shutdown or
+	 * reboot command. The device's authorized_keys line forces the same command for that key.
+	 */
+	export const SshPowerRequest = z.object({
 		...SshTarget,
 		host_key: HostKey,
 		action: Action,
 		os: z.enum(["posix", "windows"], { error: "Unknown OS" }),
 		sudo: z.boolean({ error: "Invalid sudo flag" }),
 	});
-	export type SshExecRequest = z.infer<typeof SshExecRequest>;
+	export type SshPowerRequest = z.infer<typeof SshPowerRequest>;
 
 	/**
 	 * The answer to SSH_CHECK:
 	 *
 	 * - `{ online: false }`: no TCP connection (refused, unreachable, timed out). With `error`
 	 *   only when the host name doesn't resolve.
-	 * - `{ online: true, host_key, authenticated: true }`: logged in.
-	 * - `{ online: true, host_key, authenticated: false, error: "host_key_mismatch" }`: the device
-	 *   presented `host_key` instead of the expected one; no credentials were sent.
-	 * - `{ online: true, host_key, authenticated: false, error: "auth_failed" }`
-	 * - `{ online: true, host_key?, authenticated: false, error: "<short message>" }`: anything
-	 *   else (not SSH, handshake failure, timeout). `host_key` once the handshake got that far.
+	 * - `{ online: true, host_key, shutdown, reboot }`: whether the device accepted each key.
+	 * - `{ online: true, host_key, shutdown: false, reboot: false, error: "host_key_mismatch" }`:
+	 *   the device presented `host_key` instead of the expected one; no key was offered.
+	 * - `{ online: true, host_key?, shutdown, reboot, error: "<short message>" }`: anything else
+	 *   (not SSH, handshake failure, timeout). `host_key` once the handshake got that far.
 	 */
 	export type SshCheckResult = {
 		online: boolean;
 		host_key?: string;
-		authenticated?: boolean;
+		shutdown?: boolean;
+		reboot?: boolean;
 		error?: string;
 	};
 

@@ -2,6 +2,7 @@ import { chmod, chown, mkdir, readFile, rename, rm, stat, writeFile } from "node
 import { dirname } from "node:path";
 import { z } from "zod";
 import { ServerUrl } from "../net/serverUrl";
+import { SshKeys } from "../ssh/sshKeys";
 import { AppConstants } from "../utils/constants";
 import { AppError } from "../utils/errors";
 import { Platform } from "../utils/platform";
@@ -11,11 +12,13 @@ import { Platform } from "../utils/platform";
  *
  * ```json
  * { "server": "https://netignite.example.com", "agent_id": 3, "token_id": "…", "secret": "…",
- *   "wol": { "enabled": false } }
+ *   "wol": { "enabled": false }, "ssh_keys": { "shutdown": "-----BEGIN OPENSSH…", "reboot": "…" } }
  * ```
  *
- * It holds the agent's long-term secret, so it is always mode 0600: owned by the service user
- * `netignite` once that exists (the service has to read it), by root before.
+ * It holds the agent's long-term secret and its SSH private keys (Wake-on-LAN mode logs in to
+ * other devices with them), so it is always mode 0600: owned by the service user `netignite` once
+ * that exists (the service has to read it), by root before. The service can't write it, so `pair`,
+ * `install` and `wol-mode on` create missing keys.
  */
 export class AgentConfig {
 	/** Agent-generated secrets: 32–128 URL-safe characters (same rule as the server). */
@@ -42,6 +45,12 @@ export class AgentConfig {
 			.regex(/^[^:\s]+$/, "Invalid token id"),
 		secret: z.string().regex(AgentConfig.SECRET_PATTERN, "Invalid secret"),
 		wol: z.object({ enabled: z.boolean() }).default({ enabled: false }),
+		ssh_keys: z
+			.object({
+				shutdown: z.string().refine(SshKeys.isUsablePrivateKey, "Invalid SSH key"),
+				reboot: z.string().refine(SshKeys.isUsablePrivateKey, "Invalid SSH key"),
+			})
+			.optional(),
 	});
 
 	/** Validates parsed JSON. */
@@ -159,6 +168,12 @@ export class AgentConfig {
 			const reason = error instanceof Error ? error.message : String(error);
 			throw new ConfigError(`Can't write ${path}: ${reason}`);
 		}
+	}
+
+	/** The config with SSH keys: the existing ones, or new ones if it has none. */
+	static withSshKeys(config: AgentConfig.Data): { config: AgentConfig.Data; created: boolean } {
+		if (config.ssh_keys) return { config, created: false };
+		return { config: { ...config, ssh_keys: SshKeys.generate(config.agent_id) }, created: true };
 	}
 
 	/** The bearer credential: `netignite_agent_<token_id>:<secret>`. */

@@ -9,6 +9,7 @@ import { ServerUrl } from "../net/serverUrl";
 import { StatusProbe } from "../net/statusProbe";
 import { WakeSender } from "../net/wakeSender";
 import { AgentProtocol } from "../protocol/agentProtocol";
+import { SshKeys } from "../ssh/sshKeys";
 import { SshRemote } from "../ssh/sshRemote";
 import { CommandFlags } from "../utils/commandFlags";
 import { AppConstants } from "../utils/constants";
@@ -95,12 +96,31 @@ export class RunCMD extends CLIBaseCommand<typeof ARGS> {
 			);
 		}
 
-		const defaultHostControl: HostControl.Executor | null = linux ? HostControl.execute : null;
+		// SSH logins to other devices: Wake-on-LAN mode, the agent's keys, and TLS to the server.
+		const sshUnavailable = !wolEnabled
+			? "Wake-on-LAN mode is off"
+			: !config.ssh_keys
+				? `This agent has no SSH keys yet: run "sudo ${AppConstants.BINARY_NAME} install" again`
+				: !server.secure && (options.sshRequiresTls ?? true)
+					? "SSH needs an https:// server address (the agent connects without TLS)"
+					: null;
+		const ssh =
+			sshUnavailable || !config.ssh_keys
+				? null
+				: options.ssh === undefined
+					? new SshRemote(config.ssh_keys)
+					: options.ssh;
+		if (wolEnabled && sshUnavailable)
+			Logger.warn(`No shutdown or reboot of other devices over SSH: ${sshUnavailable}`);
+		const sshKeys = ssh && config.ssh_keys ? SshKeys.publicKeys(config.ssh_keys) : null;
+
+		const defaultHostControl: HostControl.Perform | null = linux ? HostControl.perform : null;
 		const handler = new RequestHandler({
 			wolEnabled,
 			statusProbe: options.statusProbe ?? new StatusProbe(),
 			wake: options.wake ?? ((mac, port) => WakeSender.send(mac, port)),
-			ssh: options.ssh ?? new SshRemote(),
+			ssh,
+			sshUnavailable: sshUnavailable ?? undefined,
 			hostControl: options.hostControl === undefined ? defaultHostControl : options.hostControl,
 			// Only for the real executor: an injected one (tests) runs nothing on this machine.
 			hostControlCheck: options.hostControl === undefined && linux ? HostControl.check : null,
@@ -111,7 +131,7 @@ export class RunCMD extends CLIBaseCommand<typeof ARGS> {
 			url: server.wsUrl(AgentProtocol.WS_PATH),
 			credential: AgentConfig.credential(config),
 			agentID: config.agent_id,
-			hello: () => HostInfo.hello(wolEnabled),
+			hello: () => HostInfo.hello({ wol: wolEnabled, sshKeys }),
 			hostStatus: () => HostInfo.status(),
 			handler,
 			...options.client,
@@ -125,9 +145,12 @@ export namespace RunCMD {
 		wol?: boolean;
 		statusProbe?: RequestHandler.Options["statusProbe"];
 		wake?: RequestHandler.Options["wake"];
-		ssh?: RequestHandler.Options["ssh"];
-		/** `null`: host control unsupported. Default: `systemctl` on Linux. */
-		hostControl?: HostControl.Executor | null;
+		/** Replaces the SSH client (tests); still only used with keys and TLS. */
+		ssh?: RequestHandler.SshClient | null;
+		/** Tests against a plain-WebSocket fake server only; no CLI flag sets it. */
+		sshRequiresTls?: boolean;
+		/** `null`: host control unsupported. Default: the systemd units on Linux. */
+		hostControl?: HostControl.Perform | null;
 		hostControlDelayMs?: number;
 		/** Timing and probe overrides for the connection. */
 		client?: Pick<

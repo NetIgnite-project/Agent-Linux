@@ -93,17 +93,16 @@ export class PairCMD extends CLIBaseCommand<typeof ARGS> {
 		const result = await Enrollment.enroll(server, token, secret);
 
 		try {
-			await AgentConfig.save(
-				configPath,
-				{
-					server: server.toString(),
-					agent_id: result.agent_id,
-					token_id: result.token_id,
-					secret,
-					wol: { enabled: wol },
-				},
-				{ serviceUser },
-			);
+			// SSH keys survive pairing again, so devices that allow them keep working.
+			const { config } = AgentConfig.withSshKeys({
+				server: server.toString(),
+				agent_id: result.agent_id,
+				token_id: result.token_id,
+				secret,
+				wol: { enabled: wol },
+				ssh_keys: previous?.ssh_keys,
+			});
+			await AgentConfig.save(configPath, config, { serviceUser });
 		} catch (error) {
 			const reason = error instanceof Error ? error.message : String(error);
 			throw new AppError(

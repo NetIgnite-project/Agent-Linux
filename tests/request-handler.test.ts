@@ -2,13 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { rm } from "node:fs/promises";
 import type { NetworkInterfaceInfo } from "node:os";
 import { join } from "node:path";
-import { utils } from "ssh2";
 import { HostControl } from "../src/agent/hostControl";
 import { HostInfo } from "../src/agent/hostInfo";
 import { RequestHandler } from "../src/agent/requestHandler";
 import { SystemFiles } from "../src/install/systemFiles";
 import type { MacAddress } from "../src/net/macAddress";
 import { AgentProtocol } from "../src/protocol/agentProtocol";
+import { SshKeys } from "../src/ssh/sshKeys";
 import { Logger } from "../src/utils/logger";
 import { makeTempDir, removeTempDir } from "./helpers/cli";
 import { ServerProtocol } from "./helpers/server-protocol";
@@ -21,7 +21,7 @@ function makeHandler(options: Partial<RequestHandler.Options> = {}) {
 		status: [] as AgentProtocol.StatusRequest[],
 		hostControl: [] as HostControl.Action[],
 		sshCheck: [] as AgentProtocol.SshCheckRequest[],
-		sshExec: [] as AgentProtocol.SshExecRequest[],
+		sshPower: [] as AgentProtocol.SshPowerRequest[],
 	};
 	const handler = new RequestHandler({
 		wolEnabled: true,
@@ -41,12 +41,15 @@ function makeHandler(options: Partial<RequestHandler.Options> = {}) {
 		ssh: {
 			check: async (request) => {
 				calls.sshCheck.push(request);
-				return { online: true, host_key: HOST_KEY, authenticated: true };
+				return {
+					ok: true,
+					result: { online: true, host_key: HOST_KEY, shutdown: true, reboot: false },
+				};
 			},
-			exec: async (request) => {
-				calls.sshExec.push(request);
+			power: async (request) => {
+				calls.sshPower.push(request);
 				return request.action === "reboot"
-					? { ok: false, error: "authentication failed" }
+					? { ok: false, error: "the device didn't accept the agent's reboot key" }
 					: { ok: true };
 			},
 		},
@@ -56,20 +59,12 @@ function makeHandler(options: Partial<RequestHandler.Options> = {}) {
 }
 
 const HOST_KEY = "SHA256:DcMC1wdAY3Z/tgRBo2BNYADDzJ63IywaXdcFMUjqjC8";
-const PRIVATE_KEY = utils.generateKeyPairSync("ed25519").private;
 
 function sshCheckPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-	return {
-		host: "192.168.1.20",
-		port: 22,
-		username: "admin",
-		auth: { type: "password", password: "hunter2" },
-		host_key: HOST_KEY,
-		...overrides,
-	};
+	return { host: "192.168.1.20", port: 22, username: "netignite", host_key: HOST_KEY, ...overrides };
 }
 
-function sshExecPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+function sshPowerPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 	return sshCheckPayload({ action: "shutdown", os: "posix", sudo: true, ...overrides });
 }
 
@@ -105,16 +100,16 @@ describe("RequestHandler", () => {
 			expect(calls.status).toEqual([]);
 		});
 
-		test("SSH_CHECK and SSH_EXEC are rejected before anything is parsed or connected", async () => {
+		test("SSH_CHECK and SSH_POWER are rejected before anything is parsed or connected", async () => {
 			const { handler, calls } = makeHandler({ wolEnabled: false });
 			expect(errorOf(await handler.handle("SSH_CHECK", sshCheckPayload()))).toContain(
 				"Wake-on-LAN mode is off",
 			);
-			expect(errorOf(await handler.handle("SSH_EXEC", sshExecPayload()))).toContain(
+			expect(errorOf(await handler.handle("SSH_POWER", sshPowerPayload()))).toContain(
 				"Wake-on-LAN mode is off",
 			);
 			expect(calls.sshCheck).toEqual([]);
-			expect(calls.sshExec).toEqual([]);
+			expect(calls.sshPower).toEqual([]);
 		});
 
 		test("HOST_CONTROL is refused with the check's reason when it isn't possible", async () => {
@@ -286,7 +281,7 @@ describe("SSH_CHECK", () => {
 		const { handler, calls } = makeHandler();
 		expect(await handler.handle("SSH_CHECK", sshCheckPayload())).toEqual({
 			ok: true,
-			p: { online: true, host_key: HOST_KEY, authenticated: true },
+			p: { online: true, host_key: HOST_KEY, shutdown: true, reboot: false },
 		});
 		expect(calls.sshCheck).toEqual([sshCheckPayload() as AgentProtocol.SshCheckRequest]);
 	});
@@ -299,17 +294,15 @@ describe("SSH_CHECK", () => {
 		expect(calls.sshCheck.map((request) => request.host_key ?? null)).toEqual([null, null]);
 	});
 
-	test("accepts key auth, IPv6, host names and Windows user names", async () => {
+	test("accepts IPv6, host names and Windows user names", async () => {
 		const { handler } = makeHandler();
 		for (const overrides of [
-			{ auth: { type: "key", private_key: PRIVATE_KEY } },
 			{ host: "fd00::20" },
 			{ host: "fe80::1%eth0" },
 			{ host: "nas.lan" },
 			{ username: "DESKTOP-1\\Jane Doe" },
 			{ username: "jane@example.com" },
 			{ port: 65535 },
-			{ auth: { type: "password", password: "" } },
 		]) {
 			expect((await handler.handle("SSH_CHECK", sshCheckPayload(overrides))).ok).toBe(true);
 		}
@@ -331,13 +324,6 @@ describe("SSH_CHECK", () => {
 			[{ host: "-oProxyCommand=x" }, "Invalid host"],
 			[{ host: "a b" }, "Invalid host"],
 			[{ host: 192 }, "Invalid host"],
-			[{ auth: { type: "kerberos" } }, "Unknown auth type"],
-			[{ auth: { password: "x" } }, "Unknown auth type"],
-			[{ auth: undefined }, "Unknown auth type"],
-			[{ auth: { type: "password" } }, "Invalid password"],
-			[{ auth: { type: "password", password: 42 } }, "Invalid password"],
-			[{ auth: { type: "key" } }, "Invalid private key"],
-			[{ auth: { type: "key", private_key: "not a key" } }, "Invalid private key"],
 			[{ host_key: "MD5:aa:bb" }, "Invalid host key"],
 			[{ host_key: `${HOST_KEY}=` }, "Invalid host key"],
 			[{ host_key: 5 }, "Invalid host key"],
@@ -348,40 +334,52 @@ describe("SSH_CHECK", () => {
 		expect(calls.sshCheck).toEqual([]);
 	});
 
-	test("error messages never contain the credentials", async () => {
-		const { handler } = makeHandler();
-		const secret = "-----BEGIN OPENSSH PRIVATE KEY-----\nc2VjcmV0LWtleS1tYXRlcmlhbA==\n";
-		const outcome = await handler.handle(
+	test("credentials from the server are ignored: the agent only uses its own keys", async () => {
+		const { handler, calls } = makeHandler();
+		await handler.handle(
 			"SSH_CHECK",
-			sshCheckPayload({ auth: { type: "key", private_key: secret } }),
+			sshCheckPayload({ auth: { type: "password", password: "hunter2" } }),
 		);
-		expect(errorOf(outcome)).toBe("Invalid private key");
+		expect(calls.sshCheck[0]).not.toHaveProperty("auth");
+	});
+
+	test("a refused check (login limit) becomes ok:false", async () => {
+		const { handler } = makeHandler({
+			ssh: {
+				check: async () => ({ ok: false, error: "Too many SSH logins" }),
+				power: async () => ({ ok: true }),
+			},
+		});
+		expect(await handler.handle("SSH_CHECK", sshCheckPayload())).toEqual({
+			ok: false,
+			err: "Too many SSH logins",
+		});
 	});
 });
 
-describe("SSH_EXEC", () => {
+describe("SSH_POWER", () => {
 	test("passes the validated request on", async () => {
 		const { handler, calls } = makeHandler();
-		expect(await handler.handle("SSH_EXEC", sshExecPayload())).toEqual({ ok: true, p: {} });
-		expect(calls.sshExec[0]).toMatchObject({ action: "shutdown", os: "posix", sudo: true });
+		expect(await handler.handle("SSH_POWER", sshPowerPayload())).toEqual({ ok: true, p: {} });
+		expect(calls.sshPower[0]).toMatchObject({ action: "shutdown", os: "posix", sudo: true });
 	});
 
 	test("a failure becomes ok:false with the error", async () => {
 		const { handler } = makeHandler();
-		expect(await handler.handle("SSH_EXEC", sshExecPayload({ action: "reboot" }))).toEqual({
+		expect(await handler.handle("SSH_POWER", sshPowerPayload({ action: "reboot" }))).toEqual({
 			ok: false,
-			err: "authentication failed",
+			err: "the device didn't accept the agent's reboot key",
 		});
 	});
 
 	test("requires the host key", async () => {
 		const { handler, calls } = makeHandler();
-		const { host_key: _, ...withoutKey } = sshExecPayload();
-		expect(errorOf(await handler.handle("SSH_EXEC", withoutKey))).toBe("Missing host key");
-		expect(errorOf(await handler.handle("SSH_EXEC", sshExecPayload({ host_key: null })))).toBe(
+		const { host_key: _, ...withoutKey } = sshPowerPayload();
+		expect(errorOf(await handler.handle("SSH_POWER", withoutKey))).toBe("Missing host key");
+		expect(errorOf(await handler.handle("SSH_POWER", sshPowerPayload({ host_key: null })))).toBe(
 			"Missing host key",
 		);
-		expect(calls.sshExec).toEqual([]);
+		expect(calls.sshPower).toEqual([]);
 	});
 
 	test("rejects unknown actions, systems and bad flags", async () => {
@@ -396,33 +394,69 @@ describe("SSH_EXEC", () => {
 			[{ sudo: undefined }, "Invalid sudo flag"],
 			[{ port: -1 }, "Invalid port"],
 			[{ username: "" }, "Invalid username"],
-			[{ auth: { type: "agent" } }, "Unknown auth type"],
 		];
 		for (const [overrides, error] of cases) {
-			expect(errorOf(await handler.handle("SSH_EXEC", sshExecPayload(overrides)))).toBe(error);
+			expect(errorOf(await handler.handle("SSH_POWER", sshPowerPayload(overrides)))).toBe(error);
 		}
-		expect(calls.sshExec).toEqual([]);
+		expect(calls.sshPower).toEqual([]);
 	});
 
 	test("drops fields it doesn't know (there is no free-text command)", async () => {
 		const { handler, calls } = makeHandler();
-		await handler.handle("SSH_EXEC", sshExecPayload({ command: "rm -rf /" }));
-		expect(calls.sshExec[0]).not.toHaveProperty("command");
+		await handler.handle("SSH_POWER", sshPowerPayload({ command: "rm -rf /" }));
+		expect(calls.sshPower[0]).not.toHaveProperty("command");
+	});
+
+	test("SSH_EXEC (2.0.0-beta.2) is an unknown command", async () => {
+		const { handler, calls } = makeHandler();
+		expect(errorOf(await handler.handle("SSH_EXEC", sshPowerPayload()))).toBe(
+			"Unknown command SSH_EXEC",
+		);
+		expect(calls.sshPower).toEqual([]);
+	});
+});
+
+describe("without SSH (no keys, or no TLS to the server)", () => {
+	test("SSH_CHECK and SSH_POWER say why, without parsing or connecting", async () => {
+		const { handler, calls } = makeHandler({
+			ssh: null,
+			sshUnavailable: "SSH needs an https:// server address (the agent connects without TLS)",
+		});
+		for (const [cmd, payload] of [
+			["SSH_CHECK", sshCheckPayload()],
+			["SSH_POWER", sshPowerPayload()],
+		] as const) {
+			expect(errorOf(await handler.handle(cmd, payload))).toBe(
+				"SSH needs an https:// server address (the agent connects without TLS)",
+			);
+		}
+		expect(calls.sshCheck).toEqual([]);
+		expect(calls.sshPower).toEqual([]);
 	});
 });
 
 describe("AgentProtocol", () => {
-	test("capabilities: host always, Wake-on-LAN extras (and ssh) only in WOL mode", () => {
-		expect(AgentProtocol.capabilities(false)).toEqual(["host.status", "host.control"]);
-		expect(AgentProtocol.capabilities(true)).toEqual([
+	test("capabilities: host always, Wake-on-LAN extras in WOL mode, ssh.power with keys and TLS", () => {
+		const wol = ["wake", "status.link_local", "status.ip", "status.host", "status.tcp"] as const;
+		expect(AgentProtocol.capabilities({ wol: false, ssh: false })).toEqual([
 			"host.status",
 			"host.control",
-			"wake",
-			"status.link_local",
-			"status.ip",
-			"status.host",
-			"status.tcp",
-			"ssh",
+		]);
+		// SSH only comes with Wake-on-LAN mode.
+		expect(AgentProtocol.capabilities({ wol: false, ssh: true })).toEqual([
+			"host.status",
+			"host.control",
+		]);
+		expect(AgentProtocol.capabilities({ wol: true, ssh: false })).toEqual([
+			"host.status",
+			"host.control",
+			...wol,
+		]);
+		expect(AgentProtocol.capabilities({ wol: true, ssh: true })).toEqual([
+			"host.status",
+			"host.control",
+			...wol,
+			"ssh.power",
 		]);
 	});
 
@@ -489,13 +523,22 @@ describe("HostInfo", () => {
 		).toEqual({ ipv4: ["192.168.1.20"], ipv6: ["fe80::1"] });
 	});
 
-	test("HELLO matches the server's schema", async () => {
+	test("HELLO matches the server's schema; SSH keys only come with ssh.power", async () => {
+		const sshKeys = SshKeys.publicKeys(SshKeys.generate(3));
+		const withSsh = ServerProtocol.Hello.parse(await HostInfo.hello({ wol: true, sshKeys }));
+		expect(withSsh.capabilities).toContain("ssh.power");
+		expect(withSsh.ssh_keys).toEqual(sshKeys);
+		const hostMode = ServerProtocol.Hello.parse(await HostInfo.hello({ wol: false, sshKeys }));
+		expect(hostMode.capabilities).not.toContain("ssh.power");
+		expect(hostMode.ssh_keys).toBeUndefined();
+
 		for (const wol of [false, true]) {
-			const hello = await HostInfo.hello(wol);
+			const hello = await HostInfo.hello({ wol, sshKeys: null });
 			const parsed = ServerProtocol.Hello.parse(hello);
 			expect(parsed.protocol).toBe(2);
 			expect(parsed.kind).toBe("linux");
-			expect(parsed.capabilities).toEqual(AgentProtocol.capabilities(wol));
+			expect(parsed.capabilities).toEqual(AgentProtocol.capabilities({ wol, ssh: false }));
+			expect(parsed.ssh_keys).toBeUndefined();
 			expect(parsed.info).toMatchObject({
 				hostname: expect.any(String),
 				kernel: expect.any(String),
@@ -539,7 +582,7 @@ describe("HostControl", () => {
 		expect(HostControl.blockingInhibitor('{"data":[]}')).toBeNull();
 	});
 
-	test("execute returns once the .path unit picked the request up", async () => {
+	test("perform returns once the .path unit picked the request up", async () => {
 		const dir = await makeTempDir();
 		try {
 			const requestPath = join(dir, "shutdown");
@@ -548,25 +591,25 @@ describe("HostControl", () => {
 				while (!(await Bun.file(requestPath).exists())) await Bun.sleep(20);
 				await rm(requestPath);
 			})();
-			await HostControl.execute("shutdown", { requestPath, timeoutMs: 3000 });
+			await HostControl.perform("shutdown", { requestPath, timeoutMs: 3000 });
 			await pickUp;
 		} finally {
 			await removeTempDir(dir);
 		}
 	});
 
-	test("execute fails and removes the request when nothing picks it up", async () => {
+	test("perform fails and removes the request when nothing picks it up", async () => {
 		const dir = await makeTempDir();
 		try {
 			const requestPath = join(dir, "reboot");
-			await expect(HostControl.execute("reboot", { requestPath, timeoutMs: 300 })).rejects.toThrow(
+			await expect(HostControl.perform("reboot", { requestPath, timeoutMs: 300 })).rejects.toThrow(
 				"nothing picked the request up",
 			);
 			// A request left behind would reboot the machine whenever the unit becomes active.
 			expect(await Bun.file(requestPath).exists()).toBe(false);
 
 			await expect(
-				HostControl.execute("reboot", { requestPath: join(dir, "missing", "reboot") }),
+				HostControl.perform("reboot", { requestPath: join(dir, "missing", "reboot") }),
 			).rejects.toThrow("can't create");
 		} finally {
 			await removeTempDir(dir);

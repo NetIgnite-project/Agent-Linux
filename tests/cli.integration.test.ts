@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { AgentConfig } from "../src/config/agentConfig";
 import { SystemFiles } from "../src/install/systemFiles";
@@ -69,6 +69,20 @@ describe("pair", () => {
 	posixOnly("the config is written with mode 0600", async () => {
 		const { path } = await pairNew("pair-mode", 13);
 		expect((await stat(path)).mode & 0o777).toBe(0o600);
+	});
+
+	test("creates the agent's SSH keys, and pairing again keeps them", async () => {
+		const { path } = await pairNew("pair-keys", 16);
+		const first = await AgentConfig.load(path);
+		expect(first.ssh_keys).toBeDefined();
+		expect(first.ssh_keys?.shutdown).not.toBe(first.ssh_keys?.reboot);
+
+		const token = server.addEnrollment(17);
+		expect((await runCLI(["pair", server.url, token, "--config", path])).exitCode).toBe(0);
+		const second = await AgentConfig.load(path);
+		expect(second.agent_id).toBe(17);
+		// Devices that allow the keys keep working after pairing again.
+		expect(second.ssh_keys).toEqual(first.ssh_keys);
 	});
 
 	test("--wol turns on Wake-on-LAN mode", async () => {
@@ -271,6 +285,16 @@ describe("other commands", () => {
 		const result = await runCLI(["install"]);
 		expect(result.exitCode).toBe(1);
 		expect(result.output).toMatch(/needs Linux|must run as root/);
+	});
+
+	test("wol-mode on adds SSH keys to a config from before 1.0.0", async () => {
+		const { path } = await pairNew("wol-mode-keys", 32);
+		const { ssh_keys: _, ...old } = JSON.parse(await readFile(path, "utf8"));
+		await writeFile(path, JSON.stringify(old));
+		expect((await runCLI(["wol-mode", "on", "--config", path])).exitCode).toBe(0);
+		const config = await AgentConfig.load(path);
+		expect(config.wol.enabled).toBe(true);
+		expect(config.ssh_keys).toBeDefined();
 	});
 
 	test("wol-mode switches Wake-on-LAN mode in the config", async () => {

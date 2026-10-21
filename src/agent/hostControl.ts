@@ -77,7 +77,7 @@ export class HostControl {
 	 * picked it up (deleted it). If nothing does, removes the file again, so that it can't fire
 	 * later, and throws.
 	 */
-	static async execute(
+	static async perform(
 		action: HostControl.Action,
 		options: { requestPath?: string; timeoutMs?: number } = {},
 	) {
@@ -133,7 +133,7 @@ export class HostControl {
 
 export namespace HostControl {
 	export type Action = "shutdown" | "reboot";
-	export type Executor = (action: Action) => Promise<void>;
+	export type Perform = (action: Action) => Promise<void>;
 	/** Returns why the action isn't possible now, or null. */
 	export type Check = (action: Action) => Promise<string | null>;
 }

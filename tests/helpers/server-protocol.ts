@@ -36,6 +36,14 @@ export namespace ServerProtocol {
 		version: z.string().min(1).max(64),
 		capabilities: z.array(z.string().max(64)).max(64),
 		info: z.record(z.string(), z.unknown()).optional(),
+		// The server's SshKeys.PUBLIC_KEY_PATTERN (server/lib/ssh/keys.ts). The server drops
+		// invalid keys; tests are strict so a bad key shows up.
+		ssh_keys: z
+			.object({
+				shutdown: z.string().regex(/^ssh-ed25519 [A-Za-z0-9+/]{68}$/),
+				reboot: z.string().regex(/^ssh-ed25519 [A-Za-z0-9+/]{68}$/),
+			})
+			.optional(),
 	});
 	export type Hello = z.infer<typeof Hello>;
 
