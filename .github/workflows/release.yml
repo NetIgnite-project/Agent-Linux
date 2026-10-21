@@ -1,0 +1,66 @@
+# .github/workflows/release.yml — builds the agent for every platform and attaches the binaries
+# and SHA256SUMS to a GitHub Release. Push a tag `v<version>` matching package.json to trigger.
+#
+# The server's install script downloads
+#   https://github.com/NetIgnite-project/Agent-Linux/releases/latest/download/netignite-agent-linux-<arch>
+# and checks it against SHA256SUMS from the same release, so the asset names are fixed.
+# Versions with a suffix (1.0.0-beta.1) become pre-releases, which `latest` skips.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+
+      - name: Check the tag against package.json
+        id: version
+        run: |
+          version="$(bun -e 'console.log(require("./package.json").version)')"
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match package.json version $version (the binaries report package.json's)."
+            exit 1
+          fi
+          case "$version" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - run: bun run check:ci
+      - run: bun run typecheck
+      - run: bun test
+      - run: bun run compile all --no-version-tag
+
+      - name: Collect the assets and SHA256SUMS
+        run: |
+          mkdir -p dist
+          for arch in x64 x64-baseline arm64; do
+            cp "build/bin/netignite-agent-linux-$arch" "dist/netignite-agent-linux-$arch"
+          done
+          ./dist/netignite-agent-linux-x64 version
+          cd dist
+          sha256sum netignite-agent-linux-x64 netignite-agent-linux-x64-baseline netignite-agent-linux-arm64 > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/netignite-agent-linux-x64
+            dist/netignite-agent-linux-x64-baseline
+            dist/netignite-agent-linux-arm64
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          prerelease: ${{ steps.version.outputs.prerelease }}

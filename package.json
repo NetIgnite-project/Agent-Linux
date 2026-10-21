@@ -1,0 +1,32 @@
+{
+	"name": "@netignite/agent-linux",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "NetIgnite Agent for Linux: lets a NetIgnite server check, shut down and reboot this machine, and optionally wake other devices on its network",
+	"license": "AGPL-3.0-only",
+	"scripts": {
+		"check": "bunx --bun biome check",
+		"check:ci": "bunx --bun biome ci",
+		"format": "bunx --bun biome format --write",
+		"lint": "bunx --bun biome lint",
+		"typecheck": "bunx --bun tsc -p ./tsconfig/tsconfig.typecheck.json && echo 'Typecheck passed!'",
+		"test": "bun test",
+		"test:ci": "bun test --coverage --reporter=junit --reporter-outfile=./junit.xml",
+		"dev": "bun run --watch src/index.ts",
+		"start": "bun run scripts/entrypoint.ts",
+		"compile": "bun run ./scripts/compile"
+	},
+	"dependencies": {
+		"@cleverjs/cli": "^2.4.0",
+		"zod": "^4.4.3"
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^2.5.0",
+		"@types/bun": "^1.4.3",
+		"typescript": "^6.0.3"
+	},
+	"peerDependencies": {
+		"typescript": "^6.0.3 || ^7.0.0"
+	}
+}

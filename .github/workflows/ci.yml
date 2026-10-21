@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run check:ci
+      - run: bun run typecheck
+      - run: bun test
+
+  # Builds the release binaries and checks that they start.
+  compile:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run compile all --no-version-tag
+      - name: Smoke test
+        run: |
+          ls -l build/bin/
+          for arch in x64 x64-baseline; do
+            ./build/bin/netignite-agent-linux-$arch version
+          done
+          ./build/bin/netignite-agent-linux-x64 install --dry-run
+          ./build/bin/netignite-agent-linux-x64 help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: netignite-agent-linux
+          path: |
+            build/bin/netignite-agent-linux-x64
+            build/bin/netignite-agent-linux-x64-baseline
+            build/bin/netignite-agent-linux-arm64
+          retention-days: 7

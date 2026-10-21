@@ -1,0 +1,23 @@
+{
+	"commands": {
+		"verify": {
+			"description": "Typecheck and run relevant tests",
+			"prompt": "Verify the current work in this repository.\n\n1. Run `bun run typecheck` first.\n2. Then run the smallest relevant `bun test <file>` command if a focused test target is obvious from the current changes.\n3. If no focused target is obvious, run `bun test`.\n\nDo not stop at the first failure. Summarize what passed, what failed, and the next fix to make."
+		},
+		"typecheck": {
+			"description": "Run the TypeScript typecheck",
+			"prompt": "Run `bun run typecheck` for this repository and report any failures clearly. If it fails, identify the smallest code change needed to fix it."
+		},
+		"test": {
+			"description": "Run the Bun test suite",
+			"prompt": "Run `bun test` for this repository. If tests fail, diagnose and fix the root cause. Summarize pass/fail status and any fixes applied."
+		},
+		"compile": {
+			"description": "Compile the CLI to a single binary",
+			"prompt": "Compile this CLI tool to a standalone binary.\n\n1. Run `bun run compile auto` to build for the host platform (or `bun run compile all` for every platform).\n2. If compilation fails, diagnose the entrypoint, target, or `--define APP_VERSION` wiring.\n3. Summarize the produced binary path(s) and any issues."
+		}
+	},
+	"fileScan": {
+		"exclude": ["node_modules/**", ".git/**", "build/**", "dist/**", "coverage/**"]
+	}
+}
