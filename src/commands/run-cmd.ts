@@ -102,6 +102,8 @@ export class RunCMD extends CLIBaseCommand<typeof ARGS> {
 			wake: options.wake ?? ((mac, port) => WakeSender.send(mac, port)),
 			ssh: options.ssh ?? new SshRemote(),
 			hostControl: options.hostControl === undefined ? defaultHostControl : options.hostControl,
+			// Only for the real executor: an injected one (tests) runs nothing on this machine.
+			hostControlCheck: options.hostControl === undefined && linux ? HostControl.check : null,
 			hostControlDelayMs: options.hostControlDelayMs,
 		});
 

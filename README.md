@@ -18,7 +18,9 @@ the server over one outgoing WebSocket (protocol v2). Nothing listens on this ma
 
 - Linux with systemd (`install` sets up a systemd service).
 - polkit for shutdown and reboot (`apt install polkitd`, `dnf install polkit`). Without it the
-  agent still runs, but shutdown/reboot from the dashboard fail.
+  agent still runs, but shutdown/reboot from the dashboard fail. Before answering, the agent asks
+  logind (`busctl … CanPowerOff`/`CanReboot`) whether it may; if not (no polkit rule, an active
+  inhibitor), the dashboard shows why.
 - Wake-on-LAN mode: `ping` (iputils or BusyBox) and `ip` (iproute2) for status checks.
 
 | Binary | For |
@@ -80,8 +82,9 @@ sudo netignite-agent pair <server-url> <enrollment-token> [--wol] [--config <pat
   queries and fragments are refused.
 - Pairing again (new token from the dashboard) replaces the credential. The server disconnects the
   old one, and an installed service is restarted with the new one.
-- An ESP32 agent's token is refused: create a Linux agent for this machine instead. The server
-  has already replaced that ESP32's credential by then, so set the ESP32 up again.
+- An ESP32 agent's token is refused, and stays valid for that ESP32: create a Linux agent for this
+  machine instead. (Servers before 2.0.0-beta.2 don't check the agent kind first; with them the
+  ESP32's credential is already replaced, so set the ESP32 up again.)
 
 ## Wake-on-LAN mode
 

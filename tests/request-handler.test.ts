@@ -113,6 +113,21 @@ describe("RequestHandler", () => {
 			expect(calls.sshExec).toEqual([]);
 		});
 
+		test("HOST_CONTROL is refused with logind's reason when it isn't allowed", async () => {
+			const { handler, calls } = makeHandler({
+				hostControlCheck: async (action) =>
+					HostControl.describeAnswer(action, action === "shutdown" ? 's "challenge"' : 's "yes"'),
+			});
+			const refused = await handler.handle("HOST_CONTROL", { action: "shutdown" });
+			expect(refused.ok).toBe(false);
+			expect(errorOf(refused)).toContain("polkit rule");
+			const allowed = await handler.handle("HOST_CONTROL", { action: "reboot" });
+			expect(allowed.ok).toBe(true);
+			if (allowed.ok) allowed.afterSend?.();
+			await Bun.sleep(60);
+			expect(calls.hostControl).toEqual(["reboot"]);
+		});
+
 		test("HOST_CONTROL still works", async () => {
 			const { handler } = makeHandler({ wolEnabled: false });
 			expect((await handler.handle("HOST_CONTROL", { action: "reboot" })).ok).toBe(true);
@@ -487,5 +502,17 @@ describe("HostInfo", () => {
 			expect(JSON.stringify(hello).length).toBeLessThan(AgentProtocol.MAX_FRAME_BYTES);
 		}
 		expect(ServerProtocol.HostStatus.safeParse(HostInfo.status()).success).toBe(true);
+	});
+});
+
+describe("HostControl.describeAnswer", () => {
+	test("maps logind's CanPowerOff/CanReboot answers", () => {
+		expect(HostControl.describeAnswer("shutdown", 's "yes"\n')).toBeNull();
+		expect(HostControl.describeAnswer("reboot", 's "challenge"\n')).toContain("polkit rule");
+		expect(HostControl.describeAnswer("shutdown", 's "no"\n')).toContain(
+			"doesn't let the agent shut down",
+		);
+		expect(HostControl.describeAnswer("reboot", 's "na"\n')).toContain("can't reboot");
+		expect(HostControl.describeAnswer("reboot", "")).toBeNull();
 	});
 });

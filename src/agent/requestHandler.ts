@@ -21,7 +21,7 @@ export class RequestHandler {
 			case "STATUS":
 				return await this.status(payload);
 			case "HOST_CONTROL":
-				return this.hostControl(payload);
+				return await this.hostControl(payload);
 			case "SSH_CHECK":
 				return await this.sshCheck(payload);
 			case "SSH_EXEC":
@@ -85,7 +85,7 @@ export class RequestHandler {
 		return result.ok ? { ok: true, p: {} } : { ok: false, err: result.error };
 	}
 
-	private hostControl(payload: Record<string, unknown>): RequestHandler.Outcome {
+	private async hostControl(payload: Record<string, unknown>): Promise<RequestHandler.Outcome> {
 		const request = AgentProtocol.parseRequest(AgentProtocol.HostControlRequest, payload);
 		if (!request.ok) return { ok: false, err: request.error };
 
@@ -98,6 +98,10 @@ export class RequestHandler {
 		}
 
 		const { action } = request.data;
+
+		// The command runs after the answer, so check now whether it would be allowed.
+		const refused = (await this.options.hostControlCheck?.(action)) ?? null;
+		if (refused) return { ok: false, err: refused };
 
 		// Answer first, act afterwards: once the machine goes down the answer couldn't be sent.
 		// If the answer can't be sent, nothing happens.
@@ -129,6 +133,8 @@ export namespace RequestHandler {
 		ssh: Pick<SshRemote, "check" | "exec">;
 		/** Null where host control isn't possible (not Linux). */
 		hostControl: HostControl.Executor | null;
+		/** Asks whether host control is allowed right now (logind); null/undefined: don't ask. */
+		hostControlCheck?: HostControl.Check | null;
 		hostControlDelayMs?: number;
 	};
 
