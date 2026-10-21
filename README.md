@@ -16,11 +16,8 @@ the server over one outgoing WebSocket (protocol v2). Nothing listens on this ma
 
 ## Requirements
 
-- Linux with systemd (`install` sets up a systemd service).
-- polkit for shutdown and reboot (`apt install polkitd`, `dnf install polkit`). Without it the
-  agent still runs, but shutdown/reboot from the dashboard fail. Before answering, the agent asks
-  logind (`busctl … CanPowerOff`/`CanReboot`) whether it may; if not (no polkit rule, an active
-  inhibitor), the dashboard shows why.
+- Linux with systemd (`install` sets up a systemd service). Nothing else is needed for shutdown
+  and reboot: no polkit, no sudo.
 - Wake-on-LAN mode: `ping` (iputils or BusyBox) and `ip` (iproute2) for status checks.
 
 | Binary | For |
@@ -62,9 +59,11 @@ files' contents, without changing anything:
 - makes the config readable for the service: `/etc/netignite` `root:netignite 0750`, the config
   `netignite:netignite 0600`
 - writes `/etc/systemd/system/netignite-agent.service`
-- writes the polkit rule `/etc/polkit-1/rules.d/50-netignite-agent.rules` (plus a `.pkla` file on
-  polkit < 0.106, e.g. Debian 11)
-- runs `systemctl daemon-reload`, `enable` and `restart`
+- writes the shutdown and reboot units `netignite-agent-shutdown.path`/`.service` and
+  `netignite-agent-reboot.path`/`.service` (see [Shutdown and reboot](#shutdown-and-reboot))
+- removes the polkit rule of versions before 1.0.0, if there is one
+- runs `systemctl daemon-reload`, enables and starts the two `.path` units, then enables and
+  (re)starts the service
 
 Check on it with `sudo netignite-agent status` and `journalctl -u netignite-agent -f`.
 
@@ -203,8 +202,8 @@ sudo netignite-agent uninstall           # keeps /etc/netignite/agent.json (root
 sudo netignite-agent uninstall --purge   # also deletes the config with the credential
 ```
 
-This stops and disables the service and removes the unit, the polkit rule, the user `netignite`
-and `/usr/local/bin/netignite-agent`. `--dry-run` shows the steps. Delete the agent in the
+This stops and disables the service and the shutdown and reboot units, removes their unit files,
+the user `netignite` and `/usr/local/bin/netignite-agent`. `--dry-run` shows the steps. Delete the agent in the
 dashboard too.
 
 ## Commands
@@ -243,8 +242,8 @@ addresses for the dashboard), then answers the server's requests.
 ## Security model
 
 - **Fixed actions only.** The server can ask for exactly these: `PING`; `HOST_CONTROL` with
-  `shutdown` or `reboot`, which runs `systemctl --no-ask-password poweroff|reboot`, about 1 s
-  after the answer was sent; and in Wake-on-LAN mode `WAKE`, `STATUS`, `SSH_CHECK` and
+  `shutdown` or `reboot` (see [Shutdown and reboot](#shutdown-and-reboot)), about 1 s after the
+  answer was sent; and in Wake-on-LAN mode `WAKE`, `STATUS`, `SSH_CHECK` and
   `SSH_EXEC` (one of four fixed commands on another device, see [SSH](#ssh)). Every parameter
   is validated: MAC addresses, ports, IP literals, host names, user names, host key
   fingerprints, private keys. Commands run without a shell, and only IP literals reach `ping`.
@@ -261,17 +260,31 @@ addresses for the dashboard), then answers the server's requests.
   config directory, `ProtectKernel*`, `ProtectControlGroups`, `ProtectClock`, `ProtectHostname`,
   `RestrictNamespaces`, `RestrictRealtime`, `RestrictSUIDSGID`, `LockPersonality`,
   `SystemCallArchitectures=native` and `RestrictAddressFamilies` (Unix, IPv4, IPv6, netlink).
-- **polkit** lets the user `netignite` (and nobody else) use exactly
-  `org.freedesktop.login1.power-off`, `power-off-multiple-sessions`, `reboot` and
-  `reboot-multiple-sessions`. The `*-multiple-sessions` actions apply when other users are
-  logged in, e.g. over SSH. The `*-ignore-inhibit` actions are not granted, so a block inhibitor
-  (a running package upgrade, for example) still stops a remote shutdown.
-- **`NoNewPrivileges` and polkit work together.** `systemctl poweroff` as `netignite` asks logind
-  over D-Bus, and logind asks polkit. No setuid helper (`sudo`, `pkexec`) is involved, which is
-  what `NoNewPrivileges` would block. The unit's seccomp-based options imply `NoNewPrivileges`
-  for a service with `User=` anyway.
+- **The agent can't shut down on its own.** It can only ask, by creating a file in its runtime
+  directory; two small root units do the shutdown or reboot and nothing else (next section).
 - The compiled binary does not load `.env` or `bunfig.toml` from the working directory, so a
   stray file there can't change how a root-run `pair` or `install` behaves.
+
+## Shutdown and reboot
+
+The service user `netignite` has no right to shut the machine down. Instead:
+
+1. The service has its own runtime directory `/run/netignite-agent` (`RuntimeDirectory=`, a tmpfs,
+   owned by `netignite`, mode `0700`). Only the agent and root can write to it.
+2. For a shutdown, the agent creates `/run/netignite-agent/shutdown` (`reboot` for a reboot).
+3. `netignite-agent-shutdown.path` (`PathExists=`) sees the file and starts
+   `netignite-agent-shutdown.service`, a root `oneshot` unit that removes the file and runs
+   `systemctl --no-block poweroff` (or `reboot`). That's all it can do.
+4. The agent waits up to 5 s for the file to disappear. If nothing picks it up, it deletes the
+   file again (so it can't fire later) and the dashboard shows the error.
+
+Before answering the server, the agent checks that the `.path` unit is active and asks logind for
+block inhibitors (`ListInhibitors`): while something such as a package upgrade blocks shutdowns,
+the dashboard says so and nothing happens. When the agent stops, systemd deletes its runtime
+directory, and a pending request with it.
+
+Versions before 1.0.0 used a polkit rule instead, which failed on machines without polkit
+("Access denied"). `install` removes that rule.
 
 ## Development
 
