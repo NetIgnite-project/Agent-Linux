@@ -9,6 +9,7 @@ import { ServerUrl } from "../net/serverUrl";
 import { StatusProbe } from "../net/statusProbe";
 import { WakeSender } from "../net/wakeSender";
 import { AgentProtocol } from "../protocol/agentProtocol";
+import { SshRemote } from "../ssh/sshRemote";
 import { CommandFlags } from "../utils/commandFlags";
 import { AppConstants } from "../utils/constants";
 import { reportError } from "../utils/errors";
@@ -99,6 +100,7 @@ export class RunCMD extends CLIBaseCommand<typeof ARGS> {
 			wolEnabled,
 			statusProbe: options.statusProbe ?? new StatusProbe(),
 			wake: options.wake ?? ((mac, port) => WakeSender.send(mac, port)),
+			ssh: options.ssh ?? new SshRemote(),
 			hostControl: options.hostControl === undefined ? defaultHostControl : options.hostControl,
 			hostControlDelayMs: options.hostControlDelayMs,
 		});
@@ -121,6 +123,7 @@ export namespace RunCMD {
 		wol?: boolean;
 		statusProbe?: RequestHandler.Options["statusProbe"];
 		wake?: RequestHandler.Options["wake"];
+		ssh?: RequestHandler.Options["ssh"];
 		/** `null`: host control unsupported. Default: `systemctl` on Linux. */
 		hostControl?: HostControl.Executor | null;
 		hostControlDelayMs?: number;

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { NetworkInterfaceInfo } from "node:os";
+import { utils } from "ssh2";
 import { HostControl } from "../src/agent/hostControl";
 import { HostInfo } from "../src/agent/hostInfo";
 import { RequestHandler } from "../src/agent/requestHandler";
@@ -15,6 +16,8 @@ function makeHandler(options: Partial<RequestHandler.Options> = {}) {
 		wake: [] as Array<{ mac: string; port: number }>,
 		status: [] as AgentProtocol.StatusRequest[],
 		hostControl: [] as HostControl.Action[],
+		sshCheck: [] as AgentProtocol.SshCheckRequest[],
+		sshExec: [] as AgentProtocol.SshExecRequest[],
 	};
 	const handler = new RequestHandler({
 		wolEnabled: true,
@@ -31,9 +34,39 @@ function makeHandler(options: Partial<RequestHandler.Options> = {}) {
 			calls.hostControl.push(action);
 		},
 		hostControlDelayMs: 20,
+		ssh: {
+			check: async (request) => {
+				calls.sshCheck.push(request);
+				return { online: true, host_key: HOST_KEY, authenticated: true };
+			},
+			exec: async (request) => {
+				calls.sshExec.push(request);
+				return request.action === "reboot"
+					? { ok: false, error: "authentication failed" }
+					: { ok: true };
+			},
+		},
 		...options,
 	});
 	return { handler, calls };
+}
+
+const HOST_KEY = "SHA256:DcMC1wdAY3Z/tgRBo2BNYADDzJ63IywaXdcFMUjqjC8";
+const PRIVATE_KEY = utils.generateKeyPairSync("ed25519").private;
+
+function sshCheckPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+	return {
+		host: "192.168.1.20",
+		port: 22,
+		username: "admin",
+		auth: { type: "password", password: "hunter2" },
+		host_key: HOST_KEY,
+		...overrides,
+	};
+}
+
+function sshExecPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+	return sshCheckPayload({ action: "shutdown", os: "posix", sudo: true, ...overrides });
 }
 
 function errorOf(outcome: RequestHandler.Outcome) {
@@ -48,8 +81,8 @@ describe("RequestHandler", () => {
 
 	test("unknown commands are rejected", async () => {
 		const { handler } = makeHandler();
-		expect(errorOf(await handler.handle("SSH_EXEC", { action: "shutdown" }))).toBe(
-			"Unknown command SSH_EXEC",
+		expect(errorOf(await handler.handle("SSH_SHELL", { command: "id" }))).toBe(
+			"Unknown command SSH_SHELL",
 		);
 		expect(errorOf(await handler.handle("ping", {}))).toBe("Unknown command ping");
 	});
@@ -66,6 +99,18 @@ describe("RequestHandler", () => {
 			expect(errorOf(status)).toContain("Wake-on-LAN mode is off");
 			expect(calls.wake).toEqual([]);
 			expect(calls.status).toEqual([]);
+		});
+
+		test("SSH_CHECK and SSH_EXEC are rejected before anything is parsed or connected", async () => {
+			const { handler, calls } = makeHandler({ wolEnabled: false });
+			expect(errorOf(await handler.handle("SSH_CHECK", sshCheckPayload()))).toContain(
+				"Wake-on-LAN mode is off",
+			);
+			expect(errorOf(await handler.handle("SSH_EXEC", sshExecPayload()))).toContain(
+				"Wake-on-LAN mode is off",
+			);
+			expect(calls.sshCheck).toEqual([]);
+			expect(calls.sshExec).toEqual([]);
 		});
 
 		test("HOST_CONTROL still works", async () => {
@@ -217,8 +262,138 @@ describe("RequestHandler", () => {
 	});
 });
 
+describe("SSH_CHECK", () => {
+	test("passes the validated request on and answers with the result", async () => {
+		const { handler, calls } = makeHandler();
+		expect(await handler.handle("SSH_CHECK", sshCheckPayload())).toEqual({
+			ok: true,
+			p: { online: true, host_key: HOST_KEY, authenticated: true },
+		});
+		expect(calls.sshCheck).toEqual([sshCheckPayload() as AgentProtocol.SshCheckRequest]);
+	});
+
+	test("host_key may be null or missing (trust on first use)", async () => {
+		const { handler, calls } = makeHandler();
+		expect((await handler.handle("SSH_CHECK", sshCheckPayload({ host_key: null }))).ok).toBe(true);
+		const { host_key: _, ...withoutKey } = sshCheckPayload();
+		expect((await handler.handle("SSH_CHECK", withoutKey)).ok).toBe(true);
+		expect(calls.sshCheck.map((request) => request.host_key ?? null)).toEqual([null, null]);
+	});
+
+	test("accepts key auth, IPv6, host names and Windows user names", async () => {
+		const { handler } = makeHandler();
+		for (const overrides of [
+			{ auth: { type: "key", private_key: PRIVATE_KEY } },
+			{ host: "fd00::20" },
+			{ host: "fe80::1%eth0" },
+			{ host: "nas.lan" },
+			{ username: "DESKTOP-1\\Jane Doe" },
+			{ username: "jane@example.com" },
+			{ port: 65535 },
+			{ auth: { type: "password", password: "" } },
+		]) {
+			expect((await handler.handle("SSH_CHECK", sshCheckPayload(overrides))).ok).toBe(true);
+		}
+	});
+
+	test("rejects bad parameters without connecting", async () => {
+		const { handler, calls } = makeHandler();
+		const cases: Array<[Record<string, unknown>, string]> = [
+			[{ port: 0 }, "Invalid port"],
+			[{ port: 65536 }, "Invalid port"],
+			[{ port: "22" }, "Invalid port"],
+			[{ port: undefined }, "Invalid port"],
+			[{ username: "" }, "Invalid username"],
+			[{ username: undefined }, "Invalid username"],
+			[{ username: "admin\n" }, "Invalid username"],
+			[{ username: "admin\u0000" }, "Invalid username"],
+			[{ username: "a".repeat(256) }, "Invalid username"],
+			[{ host: "" }, "Invalid host"],
+			[{ host: "-oProxyCommand=x" }, "Invalid host"],
+			[{ host: "a b" }, "Invalid host"],
+			[{ host: 192 }, "Invalid host"],
+			[{ auth: { type: "kerberos" } }, "Unknown auth type"],
+			[{ auth: { password: "x" } }, "Unknown auth type"],
+			[{ auth: undefined }, "Unknown auth type"],
+			[{ auth: { type: "password" } }, "Invalid password"],
+			[{ auth: { type: "password", password: 42 } }, "Invalid password"],
+			[{ auth: { type: "key" } }, "Invalid private key"],
+			[{ auth: { type: "key", private_key: "not a key" } }, "Invalid private key"],
+			[{ host_key: "MD5:aa:bb" }, "Invalid host key"],
+			[{ host_key: `${HOST_KEY}=` }, "Invalid host key"],
+			[{ host_key: 5 }, "Invalid host key"],
+		];
+		for (const [overrides, error] of cases) {
+			expect(errorOf(await handler.handle("SSH_CHECK", sshCheckPayload(overrides)))).toBe(error);
+		}
+		expect(calls.sshCheck).toEqual([]);
+	});
+
+	test("error messages never contain the credentials", async () => {
+		const { handler } = makeHandler();
+		const secret = "-----BEGIN OPENSSH PRIVATE KEY-----\nc2VjcmV0LWtleS1tYXRlcmlhbA==\n";
+		const outcome = await handler.handle(
+			"SSH_CHECK",
+			sshCheckPayload({ auth: { type: "key", private_key: secret } }),
+		);
+		expect(errorOf(outcome)).toBe("Invalid private key");
+	});
+});
+
+describe("SSH_EXEC", () => {
+	test("passes the validated request on", async () => {
+		const { handler, calls } = makeHandler();
+		expect(await handler.handle("SSH_EXEC", sshExecPayload())).toEqual({ ok: true, p: {} });
+		expect(calls.sshExec[0]).toMatchObject({ action: "shutdown", os: "posix", sudo: true });
+	});
+
+	test("a failure becomes ok:false with the error", async () => {
+		const { handler } = makeHandler();
+		expect(await handler.handle("SSH_EXEC", sshExecPayload({ action: "reboot" }))).toEqual({
+			ok: false,
+			err: "authentication failed",
+		});
+	});
+
+	test("requires the host key", async () => {
+		const { handler, calls } = makeHandler();
+		const { host_key: _, ...withoutKey } = sshExecPayload();
+		expect(errorOf(await handler.handle("SSH_EXEC", withoutKey))).toBe("Missing host key");
+		expect(errorOf(await handler.handle("SSH_EXEC", sshExecPayload({ host_key: null })))).toBe(
+			"Missing host key",
+		);
+		expect(calls.sshExec).toEqual([]);
+	});
+
+	test("rejects unknown actions, systems and bad flags", async () => {
+		const { handler, calls } = makeHandler();
+		const cases: Array<[Record<string, unknown>, string]> = [
+			[{ action: "halt" }, "Unknown action"],
+			[{ action: "shutdown -h now; rm -rf /" }, "Unknown action"],
+			[{ action: undefined }, "Unknown action"],
+			[{ os: "macos" }, "Unknown OS"],
+			[{ os: undefined }, "Unknown OS"],
+			[{ sudo: "yes" }, "Invalid sudo flag"],
+			[{ sudo: undefined }, "Invalid sudo flag"],
+			[{ port: -1 }, "Invalid port"],
+			[{ username: "" }, "Invalid username"],
+			[{ auth: { type: "agent" } }, "Unknown auth type"],
+		];
+		for (const [overrides, error] of cases) {
+			expect(errorOf(await handler.handle("SSH_EXEC", sshExecPayload(overrides)))).toBe(error);
+		}
+		expect(calls.sshExec).toEqual([]);
+	});
+
+	test("drops fields it doesn't know (there is no free-text command)", async () => {
+		const { handler, calls } = makeHandler();
+		await handler.handle("SSH_EXEC", sshExecPayload({ command: "rm -rf /" }));
+		expect(calls.sshExec[0]).not.toHaveProperty("command");
+	});
+});
+
 describe("AgentProtocol", () => {
-	test("capabilities: host always, Wake-on-LAN extras only in WOL mode", () => {
+	test("capabilities: host always, Wake-on-LAN extras (and ssh) only in WOL mode", () => {
 		expect(AgentProtocol.capabilities(false)).toEqual(["host.status", "host.control"]);
 		expect(AgentProtocol.capabilities(true)).toEqual([
 			"host.status",
@@ -228,6 +403,7 @@ describe("AgentProtocol", () => {
 			"status.ip",
 			"status.host",
 			"status.tcp",
+			"ssh",
 		]);
 	});
 

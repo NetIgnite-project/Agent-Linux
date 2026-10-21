@@ -5,8 +5,9 @@ server, so the dashboard can:
 
 - **Host mode** (always on): show whether this machine is online, and **shut it down or reboot
   it**.
-- **Wake-on-LAN mode** (optional): also **wake other devices** on this machine's network and
-  **check whether they are up** (ICMP ping, TCP port, IPv6 link-local via MAC). This is what a
+- **Wake-on-LAN mode** (optional): also **wake other devices** on this machine's network,
+  **check whether they are up** (ICMP ping, TCP port, IPv6 link-local via MAC), and **log in to
+  them over [SSH](#ssh)** to check them or **shut them down or reboot them**. This is what a
   NetIgnite ESP32 agent does, on a machine you already have running (a Raspberry Pi, a NAS, a
   home server).
 
@@ -89,8 +90,8 @@ sudo netignite-agent wol-mode on     # or: pair --wol, or: run --wol
 sudo netignite-agent wol-mode off
 ```
 
-In this mode the agent also advertises `wake`, `status.ip`, `status.host`, `status.tcp` and
-`status.link_local`. The server can then send it:
+In this mode the agent also advertises `wake`, `status.ip`, `status.host`, `status.tcp`,
+`status.link_local` and `ssh`. The server can then send it:
 
 - **WAKE**: a magic packet (6 × `FF` + 16 × the MAC) over UDP broadcast to `255.255.255.255`
   and each interface's broadcast address, 3 rounds.
@@ -103,6 +104,95 @@ In this mode the agent also advertises `wake`, `status.ip`, `status.host`, `stat
 `CAP_NET_RAW`, which `ping` needs.
 
 To test from the command line: `netignite-agent wol AA:BB:CC:DD:EE:FF [--port 9]`.
+
+## SSH
+
+In Wake-on-LAN mode the agent can also log in to devices on its network over SSH, for devices
+that don't run an agent themselves (another Linux box, a NAS, a Windows PC with OpenSSH Server).
+The server keeps the device's SSH credentials (encrypted) and sends them with each request; the
+agent does the SSH part, because it is the one inside the LAN. Host mode never does SSH: it only
+controls its own machine.
+
+- **SSH_CHECK** (status check): connect, check the host key, authenticate, disconnect. It
+  **never opens a session or channel**, so no command runs on the device, not even a forced
+  command from `authorized_keys`. Answers:
+  - `{"online": false}`: no TCP connection (refused, unreachable, or no answer within 3 s). With
+    an `error` only when the host name doesn't resolve.
+  - `{"online": true, "host_key": "SHA256:…", "authenticated": true}`
+  - `{"online": true, "host_key": "SHA256:…", "authenticated": false, "error": "host_key_mismatch"}`:
+    the device presented a different key. The agent stopped before sending any credential.
+  - `{"online": true, "host_key": "SHA256:…", "authenticated": false, "error": "auth_failed"}`
+  - `{"online": true, "authenticated": false, "error": "<message>"}`: not an SSH server, handshake
+    failure, timeout.
+- **SSH_EXEC** (shutdown/reboot): only with a known host key. Checks it, authenticates, runs one
+  fixed command and waits up to 5 s for its exit status. Exit status 0, or the connection
+  dropping before an exit status (the machine is going down), count as success. A non-zero exit
+  status fails with the start of the command's error output, e.g.
+  `"sudo -n shutdown -h now" failed with exit code 1: sudo: a password is required`.
+
+  | | posix | posix, `sudo` | windows |
+  | --- | --- | --- | --- |
+  | shutdown | `shutdown -h now` | `sudo -n shutdown -h now` | `shutdown /s /t 0` |
+  | reboot | `shutdown -r now` | `sudo -n shutdown -r now` | `shutdown /r /t 0` |
+
+Every SSH request is answered within 8 s.
+
+**Host keys** are trusted on first use: the first check runs without a known key and reports the
+device's fingerprint (`SHA256:…`, the same as `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`
+on the device). Once you confirm it in the dashboard, every check and command insists on it.
+
+**Authentication**: an unencrypted private key (OpenSSH format; Ed25519, ECDSA or RSA) or a
+password. A password is also answered to keyboard-interactive prompts, for servers that only
+offer that (e.g. `PasswordAuthentication no` with PAM).
+
+### Setting up a Linux device
+
+The dashboard generates an Ed25519 key pair for the device and shows its public key. Use a
+dedicated user on the device (here `netignite`) and let it run exactly the two commands:
+
+1. `~netignite/.ssh/authorized_keys`, one line (`from=` is optional: the address of the
+   machine the agent runs on):
+
+   ```text
+   restrict,from="192.168.1.10",command="case \"$SSH_ORIGINAL_COMMAND\" in 'sudo -n shutdown -h now'|'sudo -n shutdown -r now') exec $SSH_ORIGINAL_COMMAND ;; *) echo 'Only shutdown and reboot are allowed' >&2; exit 1 ;; esac" ssh-ed25519 AAAA… netignite
+   ```
+
+   `restrict` turns off forwarding, the agent and a PTY. The forced command runs the agent's two
+   commands and refuses anything else, so the key is worthless for anything but shutdown and
+   reboot. Status checks open no session, so the forced command doesn't run for them.
+
+2. `sudo visudo -f /etc/sudoers.d/netignite`:
+
+   ```text
+   netignite ALL=(root) NOPASSWD: /usr/sbin/shutdown -h now, /usr/sbin/shutdown -r now
+   ```
+
+   Use the path `command -v shutdown` prints. `-n` makes sudo fail at once instead of asking
+   for a password, so a missing sudoers line shows up in the dashboard as
+   `sudo: a password is required`.
+
+Turn on **sudo** for the device in the dashboard. Logging in as root with sudo off also works
+(`PermitRootLogin prohibit-password` allows it with a key; adjust the two commands in the forced
+command), but a dedicated user with exactly these two sudo rules is safer.
+
+### Setting up a Windows device
+
+Install OpenSSH Server (Settings → System → Optional features), start the `sshd` service and use
+an administrator account: put the public key in
+`C:\ProgramData\ssh\administrators_authorized_keys` (only Administrators and SYSTEM may have
+access), or use the account's password. Choose **Windows** as the OS in the dashboard.
+
+### Security
+
+- The commands are fixed (table above). Nothing from the request ends up in them: the server
+  only picks shutdown or reboot, posix or windows, and sudo or not. The agent requests no PTY,
+  sets no environment and opens no forwarding; `SSH_EXEC` opens one session for one command.
+- No credential is sent before the host key matched. `SSH_EXEC` without a known host key is
+  refused, so commands only ever go to a device whose key the owner confirmed.
+- Credentials arrive per request over the agent's WebSocket (use an `https://` server) and live
+  only in memory for that request. The agent never writes them anywhere and never logs them;
+  error messages never contain them.
+- Outside Wake-on-LAN mode SSH requests are refused before anything is parsed.
 
 ## Uninstall
 
@@ -152,10 +242,12 @@ addresses for the dashboard), then answers the server's requests.
 
 - **Fixed actions only.** The server can ask for exactly these: `PING`; `HOST_CONTROL` with
   `shutdown` or `reboot`, which runs `systemctl --no-ask-password poweroff|reboot`, about 1 s
-  after the answer was sent; and in Wake-on-LAN mode `WAKE` and `STATUS`. Every parameter is
-  validated: MAC addresses, ports, IP literals, host names. Commands run without a shell, and
-  only IP literals reach `ping`. Anything else is answered with an error. No remote shell, no
-  file access, no configuration changes from the server.
+  after the answer was sent; and in Wake-on-LAN mode `WAKE`, `STATUS`, `SSH_CHECK` and
+  `SSH_EXEC` (one of four fixed commands on another device, see [SSH](#ssh)). Every parameter
+  is validated: MAC addresses, ports, IP literals, host names, user names, host key
+  fingerprints, private keys. Commands run without a shell, and only IP literals reach `ping`.
+  Anything else is answered with an error. No remote shell, no file access, no configuration
+  changes from the server.
 - **The secret** is generated on this machine and never leaves it except in the `Authorization`
   header. The server stores only a hash. It lives in `/etc/netignite/agent.json`, mode `0600`,
   owned by root until `install`, then by `netignite`. It is never printed, not even by `status`.
@@ -194,6 +286,13 @@ The protocol's source of truth is the server: `server/lib/agents/protocol.ts`, `
 `registry.ts` and `connection.ts`, and the enroll route in
 `server/lib/api/versions/v1/routes/agents/`. `tests/helpers/server-protocol.ts` copies its schemas,
 so the tests check what the agent sends against the server's rules.
+
+SSH uses the [`ssh2`](https://github.com/mscdex/ssh2) package in pure JavaScript. `bunfig.toml`
+turns dependency install scripts off (`ignoreScripts`), so its optional native addons (and
+`cpu-features`) are never built, and the compile step marks `cpu-features` external. Without
+that, a machine with a C toolchain (CI) would build NAN addons that `bun build --compile` embeds
+in the binaries. The SSH tests use ssh2's own server (`tests/helpers/ssh-server.ts`); no sshd is
+needed.
 
 Releases: bump `version` in `package.json`, then push the tag `v<version>`. The release workflow
 attaches `netignite-agent-linux-x64`, `netignite-agent-linux-x64-baseline`,

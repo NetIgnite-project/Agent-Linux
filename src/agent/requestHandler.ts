@@ -1,6 +1,7 @@
 import { MacAddress } from "../net/macAddress";
 import type { StatusProbe } from "../net/statusProbe";
 import { AgentProtocol } from "../protocol/agentProtocol";
+import type { SshRemote } from "../ssh/sshRemote";
 import { AppConstants } from "../utils/constants";
 import { Logger } from "../utils/logger";
 import { HostControl } from "./hostControl";
@@ -21,6 +22,10 @@ export class RequestHandler {
 				return await this.status(payload);
 			case "HOST_CONTROL":
 				return this.hostControl(payload);
+			case "SSH_CHECK":
+				return await this.sshCheck(payload);
+			case "SSH_EXEC":
+				return await this.sshExec(payload);
 			default:
 				return { ok: false, err: `Unknown command ${cmd}` };
 		}
@@ -60,6 +65,26 @@ export class RequestHandler {
 		return { ok: true, p: { online } };
 	}
 
+	/** Credentials are checked here and handed to the SSH client; nothing logs them. */
+	private async sshCheck(payload: Record<string, unknown>): Promise<RequestHandler.Outcome> {
+		if (!this.options.wolEnabled) return this.wolDisabled();
+
+		const request = AgentProtocol.parseRequest(AgentProtocol.SshCheckRequest, payload);
+		if (!request.ok) return { ok: false, err: request.error };
+
+		return { ok: true, p: await this.options.ssh.check(request.data) };
+	}
+
+	private async sshExec(payload: Record<string, unknown>): Promise<RequestHandler.Outcome> {
+		if (!this.options.wolEnabled) return this.wolDisabled();
+
+		const request = AgentProtocol.parseRequest(AgentProtocol.SshExecRequest, payload);
+		if (!request.ok) return { ok: false, err: request.error };
+
+		const result = await this.options.ssh.exec(request.data);
+		return result.ok ? { ok: true, p: {} } : { ok: false, err: result.error };
+	}
+
 	private hostControl(payload: Record<string, unknown>): RequestHandler.Outcome {
 		const request = AgentProtocol.parseRequest(AgentProtocol.HostControlRequest, payload);
 		if (!request.ok) return { ok: false, err: request.error };
@@ -97,10 +122,11 @@ export class RequestHandler {
 
 export namespace RequestHandler {
 	export type Options = {
-		/** WAKE and STATUS are only answered in Wake-on-LAN mode. */
+		/** WAKE, STATUS, SSH_CHECK and SSH_EXEC are only answered in Wake-on-LAN mode. */
 		wolEnabled: boolean;
 		statusProbe: Pick<StatusProbe, "check">;
 		wake: (mac: MacAddress, port: number) => Promise<void>;
+		ssh: Pick<SshRemote, "check" | "exec">;
 		/** Null where host control isn't possible (not Linux). */
 		hostControl: HostControl.Executor | null;
 		hostControlDelayMs?: number;

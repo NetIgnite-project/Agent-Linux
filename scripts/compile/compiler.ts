@@ -80,6 +80,12 @@ export class Compiler {
 		// directory change its environment (e.g. NODE_TLS_REJECT_UNAUTHORIZED=0).
 		this.command.addArg("--no-compile-autoload-dotenv");
 		this.command.addArg("--no-compile-autoload-bunfig");
+
+		// ssh2 tries `require("cpu-features")` (an optional native addon) and does fine without it.
+		// With install scripts off (bunfig.toml) the package is there but unbuilt, and bundling it
+		// fails on its missing `.node` file. Left external, the require fails at run time instead,
+		// inside ssh2's try/catch.
+		this.command.addArg("--external cpu-features");
 	}
 
 	async build() {

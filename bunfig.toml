@@ -1,0 +1,11 @@
+# Only for development and CI. The compiled binary doesn't read bunfig.toml
+# (`--no-compile-autoload-bunfig`).
+
+[install]
+# Never run dependency install scripts. ssh2 is on Bun's default trust list, and its install
+# script (and that of its optional dependency cpu-features) would build NAN-based native addons
+# wherever a C toolchain exists, e.g. on CI. `bun build --compile` would then embed them: an x64
+# addon in the arm64 binary, and Bun can't reliably load NAN (V8 API) addons anyway. ssh2 works
+# without them (pure JS). `"trustedDependencies": []` in package.json doesn't do this: Bun ignores
+# an empty list once bun.lock exists.
+ignoreScripts = true

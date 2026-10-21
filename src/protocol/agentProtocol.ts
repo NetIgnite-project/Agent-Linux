@@ -1,6 +1,7 @@
 import { isIP } from "node:net";
 import { z } from "zod";
 import { MacAddress } from "../net/macAddress";
+import { SshKeys } from "../ssh/sshKeys";
 
 /**
  * NetIgnite agent protocol, version 2 — the agent's side of the server's
@@ -27,13 +28,17 @@ export namespace AgentProtocol {
 
 	/** The agent runs on the machine it reports and controls (always on). */
 	export const HOST_CAPABILITIES = ["host.status", "host.control"] as const;
-	/** Wake-on-LAN mode: wakes and checks other devices on the network. */
+	/**
+	 * Wake-on-LAN mode: wakes and checks other devices on the network, and logs in to them over
+	 * SSH (`SSH_CHECK`, `SSH_EXEC`).
+	 */
 	export const WOL_CAPABILITIES = [
 		"wake",
 		"status.link_local",
 		"status.ip",
 		"status.host",
 		"status.tcp",
+		"ssh",
 	] as const;
 	export type Capability = (typeof HOST_CAPABILITIES)[number] | (typeof WOL_CAPABILITIES)[number];
 
@@ -166,10 +171,96 @@ export namespace AgentProtocol {
 		.refine((request) => request.icmp || request.tcp_port, "No probe requested");
 	export type StatusRequest = z.infer<typeof StatusRequest>;
 
-	export const HostControlRequest = z.object({
-		action: z.enum(["shutdown", "reboot"], { error: "Unknown action" }),
-	});
+	const Action = z.enum(["shutdown", "reboot"], { error: "Unknown action" });
+
+	export const HostControlRequest = z.object({ action: Action });
 	export type HostControlRequest = z.infer<typeof HostControlRequest>;
+
+	// --- SSH (Wake-on-LAN mode) -------------------------------------------------------------------
+
+	/** An IP literal or a host name. */
+	const SshHost = z
+		.string({ error: "Invalid host" })
+		.max(253, "Invalid host")
+		.refine(
+			(value) => IPAddress.safeParse(value).success || HostName.safeParse(value).success,
+			"Invalid host",
+		);
+
+	/** Linux and Windows user names (`DOMAIN\user`, `user@domain`, spaces), no control characters. */
+	const SshUsername = z
+		.string({ error: "Invalid username" })
+		.min(1, "Invalid username")
+		.max(255, "Invalid username")
+		.refine((value) => !/\p{Cc}/u.test(value), "Invalid username");
+
+	/** The credentials. Held for the request only; never logged or stored. */
+	const SshAuth = z.discriminatedUnion(
+		"type",
+		[
+			z.object({
+				type: z.literal("password"),
+				password: z.string({ error: "Invalid password" }).max(1024, "Invalid password"),
+			}),
+			z.object({
+				type: z.literal("key"),
+				private_key: z
+					.string({ error: "Invalid private key" })
+					.refine((key) => SshKeys.isUsablePrivateKey(key), "Invalid private key"),
+			}),
+		],
+		{ error: "Unknown auth type" },
+	);
+	export type SshAuth = z.infer<typeof SshAuth>;
+
+	/** `SHA256:<base64 without padding>`, like `ssh-keygen -lf`. */
+	const HostKey = z
+		.string({ error: (issue) => (issue.input == null ? "Missing host key" : "Invalid host key") })
+		.regex(SshKeys.FINGERPRINT_PATTERN, "Invalid host key");
+
+	const SshTarget = {
+		host: SshHost,
+		port: Port,
+		username: SshUsername,
+		auth: SshAuth,
+	};
+
+	/**
+	 * Logs in and out again, without opening a session: is the device up, is it the one we know
+	 * (host key), do the credentials work? `host_key` null: trust on first use (the answer reports
+	 * the device's key).
+	 */
+	export const SshCheckRequest = z.object({ ...SshTarget, host_key: HostKey.nullish() });
+	export type SshCheckRequest = z.infer<typeof SshCheckRequest>;
+
+	/** Logs in (only to a known host key) and runs the fixed shutdown or reboot command. */
+	export const SshExecRequest = z.object({
+		...SshTarget,
+		host_key: HostKey,
+		action: Action,
+		os: z.enum(["posix", "windows"], { error: "Unknown OS" }),
+		sudo: z.boolean({ error: "Invalid sudo flag" }),
+	});
+	export type SshExecRequest = z.infer<typeof SshExecRequest>;
+
+	/**
+	 * The answer to SSH_CHECK:
+	 *
+	 * - `{ online: false }`: no TCP connection (refused, unreachable, timed out). With `error`
+	 *   only when the host name doesn't resolve.
+	 * - `{ online: true, host_key, authenticated: true }`: logged in.
+	 * - `{ online: true, host_key, authenticated: false, error: "host_key_mismatch" }`: the device
+	 *   presented `host_key` instead of the expected one; no credentials were sent.
+	 * - `{ online: true, host_key, authenticated: false, error: "auth_failed" }`
+	 * - `{ online: true, host_key?, authenticated: false, error: "<short message>" }`: anything
+	 *   else (not SSH, handshake failure, timeout). `host_key` once the handshake got that far.
+	 */
+	export type SshCheckResult = {
+		online: boolean;
+		host_key?: string;
+		authenticated?: boolean;
+		error?: string;
+	};
 
 	/** Validates a request payload; the error is the first problem, for the `err` of the answer. */
 	export function parseRequest<T extends z.ZodType>(
