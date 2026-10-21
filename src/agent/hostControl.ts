@@ -20,15 +20,14 @@ export class HostControl {
 	/**
 	 * Whether the action can happen right now: its `.path` unit is active and no block inhibitor
 	 * (a running package upgrade, for example) stops shutdowns. Returns why not, or null if it can
-	 * or that can't be told (no systemctl or busctl). The server gets this answer; the action
-	 * itself runs only after answering.
+	 * or that can't be told (no systemctl or busctl, or no D-Bus to ask through). The server gets
+	 * this answer; the action itself runs only after answering.
 	 */
 	static async check(action: HostControl.Action): Promise<string | null> {
 		const unit = `${SystemFiles.powerUnitName(action)}.path`;
-		const state = await HostControl.output(["systemctl", "is-active", unit]);
-		if (state !== null && state.trim() !== "active") {
-			return HostControl.notSetUp(action, `${unit} is ${state.trim() || "missing"}`);
-		}
+		// Prints the state (also for a unit that doesn't exist: "inactive"); nothing if it can't ask.
+		const state = (await HostControl.output(["systemctl", "is-active", unit]))?.trim();
+		if (state && state !== "active") return HostControl.notSetUp(action, `${unit} is ${state}`);
 
 		const inhibitors = await HostControl.output(
 			[

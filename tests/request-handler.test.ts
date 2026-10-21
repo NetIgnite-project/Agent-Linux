@@ -529,6 +529,12 @@ describe("HostControl", () => {
 				answer([["sleep:shutdown", "apt", "Installing packages", "block", 0, 1234]]),
 			),
 		).toEqual({ who: "apt", why: "Installing packages" });
+		// Verbatim from systemd 257 (Debian 13) with `systemd-inhibit --what=shutdown:sleep --mode=block`.
+		expect(
+			HostControl.blockingInhibitor(
+				'{"type":"a(ssssuu)","data":[[["shutdown:sleep","Test","pretend upgrade","block",0,883]]]}',
+			),
+		).toEqual({ who: "Test", why: "pretend upgrade" });
 		expect(HostControl.blockingInhibitor("not json")).toBeNull();
 		expect(HostControl.blockingInhibitor('{"data":[]}')).toBeNull();
 	});
