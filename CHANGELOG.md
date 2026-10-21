@@ -2,10 +2,21 @@
 
 ## 1.0.0 (2026-10-21)
 
-The first stable release of the NetIgnite agent for Linux, for NetIgnite server 2.0.0 or newer.
+The first stable release of the NetIgnite agent, for NetIgnite server 2.0.0 or newer: Linux, and
+new in this release Windows and macOS.
 
 ### Changes since 1.0.0-beta.1
 
+- **Windows and macOS.** The same agent now runs on Windows 10/11 and macOS (host mode: status,
+  shutdown, reboot; Wake-on-LAN mode stays Linux-only). Windows: a scheduled task started at boot
+  as `LOCAL SERVICE`, which runs `shutdown.exe` with fixed arguments; the config folder is
+  restricted to SYSTEM and Administrators (plus read for the agent). macOS: launchd daemons, the
+  agent as the hidden user `_netignite`, which asks a root daemon per action (`QueueDirectories`)
+  to run `/sbin/shutdown`, like the systemd units on Linux. New binaries
+  `netignite-agent-windows-x64.exe`, `netignite-agent-macos-arm64` and `netignite-agent-macos-x64`.
+- `run --log-file <path>`: also log to a file (1 MB, then one `.1`); the Windows task and the macOS
+  daemon use it.
+- The log history kept for crash reports is capped at 200 lines (it grew with every line before).
 - **Shutdown and reboot no longer need polkit.** They failed with "Access denied" on machines
   without polkit. The agent now asks by creating a file in its runtime directory
   (`/run/netignite-agent`, writable only by its user), and two root units that `install` sets up

@@ -1,3 +1,5 @@
+import { appendFileSync, existsSync, renameSync, statSync } from "node:fs";
+
 /**
  * Logger (CLI) — the backend Logger plus a `logHistory` buffer for crash dumps.
  *
@@ -17,7 +19,12 @@ export class Logger {
 
 	private static logLevel: (typeof this.logLevelMap)[Logger.LogLevel] = this.logLevelMap.info;
 
+	/** The last lines, for crash dumps. Capped: the agent runs for months. */
 	private static logHistory: string[] = [];
+	static readonly HISTORY_LINES = 200;
+
+	/** Also append every line to this file (Windows' scheduled task has no console). */
+	private static logFile: { path: string; maxBytes: number } | null = null;
 
 	static setLogLevel(level: Logger.LogLevel) {
 		if (this.logLevelMap[level] === undefined) {
@@ -35,12 +42,32 @@ export class Logger {
 		return this.logHistory;
 	}
 
+	/**
+	 * Writes the log to `path` too. When it grows past `maxBytes`, it moves to `<path>.1` (replacing
+	 * the previous one) and a new file starts, so at most twice `maxBytes` stay on disk.
+	 */
+	static setFile(path: string | null, maxBytes = 1024 * 1024) {
+		this.logFile = path ? { path, maxBytes } : null;
+	}
+
 	private static record(level: string, args: unknown[]) {
-		this.logHistory.push(
-			`[${new Date(Date.now()).toISOString()}] [${level}] ${args
-				.map((a) => (a instanceof Error ? (a.stack ?? a.message) : String(a)))
-				.join(" ")}`,
-		);
+		const line = `[${new Date(Date.now()).toISOString()}] [${level}] ${args
+			.map((a) => (a instanceof Error ? (a.stack ?? a.message) : String(a)))
+			.join(" ")}`;
+		this.logHistory.push(line);
+		if (this.logHistory.length > Logger.HISTORY_LINES) this.logHistory.shift();
+		if (this.logFile) this.writeFile(this.logFile, line);
+	}
+
+	private static writeFile(file: { path: string; maxBytes: number }, line: string) {
+		try {
+			if (existsSync(file.path) && statSync(file.path).size > file.maxBytes) {
+				renameSync(file.path, `${file.path}.1`);
+			}
+			appendFileSync(file.path, `${line}\n`);
+		} catch {
+			// The log file is a convenience; never fail because of it.
+		}
 	}
 
 	static debug(...args: unknown[]) {

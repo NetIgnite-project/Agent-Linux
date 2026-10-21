@@ -2,8 +2,12 @@ import { resolve } from "node:path";
 import { CLIBaseCommand, CLICommandArg, type CLICommandArgParser } from "@cleverjs/cli";
 import { AgentConfig } from "../config/agentConfig";
 import { Enrollment } from "../enroll/enrollment";
+import { MacFacts } from "../install/macos/macFacts";
+import { MacPlan } from "../install/macos/macPlan";
 import { PlanRunner } from "../install/planRunner";
 import { SystemFacts } from "../install/systemFacts";
+import { WindowsFacts } from "../install/windows/windowsFacts";
+import { WindowsPlan } from "../install/windows/windowsPlan";
 import { ServerUrl } from "../net/serverUrl";
 import { CommandFlags } from "../utils/commandFlags";
 import { AppConstants } from "../utils/constants";
@@ -85,8 +89,16 @@ export class PairCMD extends CLIBaseCommand<typeof ARGS> {
 		await AgentConfig.assertWritable(configPath);
 
 		const wol = wolFlag || (previous?.wol.enabled ?? false);
-		const root = Platform.isLinux() && Platform.isRoot();
-		const serviceUser = root ? await SystemFacts.userIds(AppConstants.SERVICE_USER) : null;
+		if (wol && !Platform.isLinux()) {
+			Logger.warn("Wake-on-LAN mode needs Linux; on this machine the agent runs in host mode.");
+		}
+		const privileged = Platform.isPrivileged();
+		const serviceUser =
+			privileged && Platform.isLinux()
+				? await SystemFacts.userIds(AppConstants.SERVICE_USER)
+				: privileged && Platform.isMac()
+					? await MacFacts.serviceUser()
+					: null;
 
 		Logger.info(`Pairing with ${server.toString()} ...`);
 		const secret = Enrollment.generateSecret();
@@ -116,12 +128,34 @@ export class PairCMD extends CLIBaseCommand<typeof ARGS> {
 		);
 		if (previous) Logger.info(`This replaced the previous pairing (agent ${previous.agent_id}).`);
 
-		await PairCMD.applyToService(configPath, root);
+		await PairCMD.applyToService(configPath, privileged);
 	}
 
 	/** Restarts an installed service that uses this config, so it connects with the new credential. */
-	private static async applyToService(configPath: string, root: boolean) {
-		const installedConfig = root ? await SystemFacts.installedConfigPath() : null;
+	private static async applyToService(configPath: string, privileged: boolean) {
+		if (Platform.isWindows() || Platform.isMac()) {
+			const installed =
+				privileged &&
+				configPath === AppConstants.DEFAULT_CONFIG_PATH &&
+				(Platform.isWindows()
+					? (await WindowsFacts.taskState()) !== "not installed"
+					: await MacFacts.installed());
+			if (!installed) {
+				Logger.info(
+					Platform.isWindows()
+						? `Next, as an administrator: ${AppConstants.BINARY_NAME} install  (runs the agent at every start)`
+						: `Next: sudo ${AppConstants.BINARY_NAME} install  (runs the agent as a launchd daemon)`,
+				);
+				return;
+			}
+			await PlanRunner.run(Platform.isWindows() ? WindowsPlan.restart() : MacPlan.restart(), {
+				dryRun: false,
+			});
+			Logger.info("The agent was restarted with the new credential.");
+			return;
+		}
+
+		const installedConfig = privileged ? await SystemFacts.installedConfigPath() : null;
 		if (!installedConfig) {
 			Logger.info(
 				`Next: sudo ${AppConstants.BINARY_NAME} install  (runs the agent as a systemd service)`,

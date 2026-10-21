@@ -23,15 +23,21 @@ const ARGS = CLICommandArg.defineCLIArgSpecs({
 		{
 			name: "wol",
 			type: "boolean",
-			description: "Wake-on-LAN mode for this run, even if the config has it off.",
+			description: "Wake-on-LAN mode for this run, even if the config has it off (Linux only).",
+		},
+		{
+			name: "log-file",
+			type: "string",
+			default: "",
+			description: "Also write the log to this file (the Windows task and the macOS daemon do).",
 		},
 	],
 });
 
 /**
- * `run`: the daemon the systemd service starts. Stops cleanly on SIGTERM / SIGINT. Exits with
+ * `run`: the daemon the service starts. Stops cleanly on SIGTERM / SIGINT. Exits with
  * {@link SystemFiles.EXIT_CREDENTIAL_REJECTED} when the server rejects the credential, which the
- * unit doesn't restart.
+ * systemd unit doesn't restart (launchd and the Windows task retry once a minute).
  */
 export class RunCMD extends CLIBaseCommand<typeof ARGS> {
 	static readonly ARGS = ARGS;
@@ -45,10 +51,17 @@ export class RunCMD extends CLIBaseCommand<typeof ARGS> {
 	}
 
 	async run(args: CLICommandArgParser.ParsedArgs<typeof ARGS>) {
+		if (args.flags["log-file"]) Logger.setFile(args.flags["log-file"]);
+
 		let client: AgentClient;
 		try {
 			const config = await AgentConfig.load(args.flags.config);
-			client = RunCMD.createClient(config, { wol: args.flags.wol || config.wol.enabled });
+			let wol = args.flags.wol || config.wol.enabled;
+			if (wol && !Platform.isLinux()) {
+				Logger.warn("Wake-on-LAN mode needs Linux; running in host mode.");
+				wol = false;
+			}
+			client = RunCMD.createClient(config, { wol });
 		} catch (error) {
 			reportError(error);
 			return false;
@@ -85,14 +98,14 @@ export class RunCMD extends CLIBaseCommand<typeof ARGS> {
 	static createClient(config: AgentConfig.Data, options: RunCMD.ClientOptions = {}) {
 		const server = ServerUrl.parse(config.server);
 		const wolEnabled = options.wol ?? config.wol.enabled;
-		const linux = Platform.isLinux();
+		const supported = Platform.isLinux() || Platform.isMac() || Platform.isWindows();
 
 		Logger.info(
 			`${AppConstants.APP_NAME} ${AppConstants.version()} starting (agent ${config.agent_id}, Wake-on-LAN mode ${wolEnabled ? "on" : "off"})`,
 		);
-		if (!linux) {
+		if (!supported) {
 			Logger.warn(
-				`${AppConstants.BINARY_NAME} is made for Linux: on ${process.platform}, shutdown/reboot and ICMP probes don't work.`,
+				`${AppConstants.BINARY_NAME} is made for Linux, macOS and Windows: on ${process.platform}, shutdown and reboot don't work.`,
 			);
 		}
 
@@ -114,7 +127,7 @@ export class RunCMD extends CLIBaseCommand<typeof ARGS> {
 			Logger.warn(`No shutdown or reboot of other devices over SSH: ${sshUnavailable}`);
 		const sshKeys = ssh && config.ssh_keys ? SshKeys.publicKeys(config.ssh_keys) : null;
 
-		const defaultHostControl: HostControl.Perform | null = linux ? HostControl.perform : null;
+		const defaultHostControl: HostControl.Perform | null = supported ? HostControl.perform : null;
 		const handler = new RequestHandler({
 			wolEnabled,
 			statusProbe: options.statusProbe ?? new StatusProbe(),
@@ -123,7 +136,7 @@ export class RunCMD extends CLIBaseCommand<typeof ARGS> {
 			sshUnavailable: sshUnavailable ?? undefined,
 			hostControl: options.hostControl === undefined ? defaultHostControl : options.hostControl,
 			// Only for the real executor: an injected one (tests) runs nothing on this machine.
-			hostControlCheck: options.hostControl === undefined && linux ? HostControl.check : null,
+			hostControlCheck: options.hostControl === undefined && supported ? HostControl.check : null,
 			hostControlDelayMs: options.hostControlDelayMs,
 		});
 
@@ -149,7 +162,7 @@ export namespace RunCMD {
 		ssh?: RequestHandler.SshClient | null;
 		/** Tests against a plain-WebSocket fake server only; no CLI flag sets it. */
 		sshRequiresTls?: boolean;
-		/** `null`: host control unsupported. Default: the systemd units on Linux. */
+		/** `null`: host control unsupported. Default: {@link HostControl.perform}. */
 		hostControl?: HostControl.Perform | null;
 		hostControlDelayMs?: number;
 		/** Timing and probe overrides for the connection. */

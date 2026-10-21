@@ -1,9 +1,9 @@
 # .github/workflows/release.yml — builds the agent for every platform and attaches the binaries
 # and SHA256SUMS to a GitHub Release. Push a tag `v<version>` matching package.json to trigger.
 #
-# The server's install script downloads
-#   https://github.com/NetIgnite-project/Agent-Linux/releases/latest/download/netignite-agent-linux-<arch>
-# and checks it against SHA256SUMS from the same release, so the asset names are fixed.
+# The server's install scripts (linux.sh, macos.sh, windows.ps1) download
+#   https://github.com/NetIgnite-project/Agent-Linux/releases/download/<tag>/netignite-agent-<os>-<arch>[.exe]
+# and check it against SHA256SUMS from the same release, so the asset names are fixed.
 # Versions with a suffix (1.0.0-beta.1) become pre-releases, which `latest` skips.
 
 name: Release
@@ -46,12 +46,13 @@ jobs:
       - name: Collect the assets and SHA256SUMS
         run: |
           mkdir -p dist
-          for arch in x64 x64-baseline arm64; do
-            cp "build/bin/netignite-agent-linux-$arch" "dist/netignite-agent-linux-$arch"
+          for file in netignite-agent-linux-x64 netignite-agent-linux-x64-baseline netignite-agent-linux-arm64 \
+                      netignite-agent-macos-x64 netignite-agent-macos-arm64 netignite-agent-windows-x64.exe; do
+            cp "build/bin/$file" "dist/$file"
           done
           ./dist/netignite-agent-linux-x64 version
           cd dist
-          sha256sum netignite-agent-linux-x64 netignite-agent-linux-x64-baseline netignite-agent-linux-arm64 > SHA256SUMS
+          sha256sum netignite-agent-* > SHA256SUMS
           cat SHA256SUMS
 
       - uses: softprops/action-gh-release@v2
@@ -60,6 +61,9 @@ jobs:
             dist/netignite-agent-linux-x64
             dist/netignite-agent-linux-x64-baseline
             dist/netignite-agent-linux-arm64
+            dist/netignite-agent-macos-x64
+            dist/netignite-agent-macos-arm64
+            dist/netignite-agent-windows-x64.exe
             dist/SHA256SUMS
           fail_on_unmatched_files: true
           generate_release_notes: true

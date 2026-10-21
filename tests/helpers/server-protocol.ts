@@ -8,7 +8,7 @@ import { z } from "zod";
 export namespace ServerProtocol {
 	export const VERSION = 2;
 
-	const Kind = z.enum(["esp32", "linux"]);
+	const Kind = z.enum(["esp32", "linux", "windows", "macos"]);
 	const U32 = z.number().int().min(0).max(0xffffffff);
 	const Payload = z.record(z.string(), z.unknown());
 

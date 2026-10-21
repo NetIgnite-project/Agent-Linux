@@ -5,6 +5,7 @@ import { RunCMD } from "../src/commands/run-cmd";
 import type { AgentConfig } from "../src/config/agentConfig";
 import { StatusProbe } from "../src/net/statusProbe";
 import { SshKeys } from "../src/ssh/sshKeys";
+import { AppConstants } from "../src/utils/constants";
 import { Logger } from "../src/utils/logger";
 import { FakeNetIgniteServer } from "./helpers/fake-server";
 import { ServerProtocol } from "./helpers/server-protocol";
@@ -67,7 +68,7 @@ describe("connecting", () => {
 
 		expect(connection.frames[0]?.frame).toMatchObject({ t: "evt", cmd: "HELLO" });
 		expect(hello.protocol).toBe(2);
-		expect(hello.kind).toBe("linux");
+		expect(hello.kind).toBe(AppConstants.AGENT_KIND);
 		expect(hello.version.length).toBeGreaterThan(0);
 		expect(hello.capabilities).toEqual(["host.status", "host.control"]);
 		expect(hello.info).toMatchObject({ hostname: expect.any(String), arch: process.arch });
@@ -427,7 +428,7 @@ describe("reconnecting", () => {
 		first.close(1001, "Server shutting down");
 
 		const second = await server.waitForConnection(1);
-		expect((await second.hello()).kind).toBe("linux");
+		expect((await second.hello()).kind).toBe(AppConstants.AGENT_KIND);
 	});
 
 	test("silence makes the agent drop the connection and reconnect", async () => {

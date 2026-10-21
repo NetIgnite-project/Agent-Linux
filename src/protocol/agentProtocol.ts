@@ -79,7 +79,7 @@ export namespace AgentProtocol {
 
 	export const Hello = z.object({
 		protocol: z.literal(VERSION),
-		kind: z.literal("linux"),
+		kind: z.enum(["linux", "windows", "macos"]),
 		version: z.string().min(1).max(64),
 		capabilities: z.array(z.string().max(64)).max(64),
 		info: z.record(z.string(), z.unknown()).optional(),

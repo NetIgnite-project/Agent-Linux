@@ -1,8 +1,16 @@
 import { readFile } from "node:fs/promises";
-import { hostname, type NetworkInterfaceInfo, networkInterfaces, release, uptime } from "node:os";
+import {
+	hostname,
+	type NetworkInterfaceInfo,
+	networkInterfaces,
+	release,
+	uptime,
+	version,
+} from "node:os";
 import { AgentProtocol } from "../protocol/agentProtocol";
 import type { SshKeys } from "../ssh/sshKeys";
 import { AppConstants } from "../utils/constants";
+import { Platform } from "../utils/platform";
 
 /** What the agent tells the server about the machine (HELLO `info`, HOST_STATUS). */
 export class HostInfo {
@@ -51,7 +59,18 @@ export class HostInfo {
 		return { ipv4: [...new Set(ipv4)], ipv6: [...new Set(ipv6)] };
 	}
 
+	/** Linux: os-release. macOS: `sw_vers` (macOS 15.1). Windows: the edition (Windows 11 Pro). */
 	static async readOsName() {
+		if (Platform.isWindows()) return version() || null;
+		if (Platform.isMac()) {
+			try {
+				const child = Bun.spawn(["sw_vers", "-productVersion"], { stdout: "pipe", stderr: "ignore" });
+				const productVersion = (await new Response(child.stdout).text()).trim();
+				return productVersion ? `macOS ${productVersion}` : "macOS";
+			} catch {
+				return "macOS";
+			}
+		}
 		for (const path of HostInfo.OS_RELEASE_FILES) {
 			try {
 				return HostInfo.osName(HostInfo.parseOsRelease(await readFile(path, "utf8")));

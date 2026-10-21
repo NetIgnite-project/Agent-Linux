@@ -1,0 +1,50 @@
+# .github/workflows/platforms.yml — runs the tests on Linux, macOS and Windows, then installs the
+# real service on each runner (systemd, launchd, the Windows task) and checks it end to end with
+# tests/e2e/service-check.ts. Runners are throwaway machines with root or admin rights; nothing is
+# powered off (the check uses a fake `shutdown` and only checks Windows' shutdown privilege).
+
+name: Platforms
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  service:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x64
+            binary: build/bin/netignite-agent-linux-x64
+          - os: macos-latest
+            target: macos-arm64
+            binary: build/bin/netignite-agent-macos-arm64
+          - os: windows-latest
+            target: windows-x64
+            binary: build/bin/netignite-agent-windows-x64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: bun run compile ${{ matrix.target }} 1.0.0-ci --no-version-tag
+
+      # macOS kills arm64 binaries without a signature; the install script signs the same way.
+      - name: Sign (macOS)
+        if: runner.os == 'macOS'
+        run: codesign --verify "${{ matrix.binary }}" 2>/dev/null || codesign --force --sign - "${{ matrix.binary }}"
+
+      - name: Service check
+        if: runner.os != 'Windows'
+        run: sudo "$(command -v bun)" tests/e2e/service-check.ts "${{ matrix.binary }}"
+
+      - name: Service check (elevated)
+        if: runner.os == 'Windows'
+        run: bun tests/e2e/service-check.ts "${{ matrix.binary }}"

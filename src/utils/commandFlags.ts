@@ -1,6 +1,5 @@
 import { resolve } from "node:path";
 import { AppConstants } from "./constants";
-import { Platform } from "./platform";
 
 /** Flags several commands share. */
 export namespace CommandFlags {
@@ -18,7 +17,7 @@ export namespace CommandFlags {
 	} as const;
 }
 
-/** The config path as the service sees it: absolute on Linux, unchanged elsewhere (dry runs). */
+/** The config path as the service sees it: absolute. */
 export function serviceConfigPath(path: string) {
-	return Platform.isLinux() ? resolve(path) : path;
+	return resolve(path);
 }

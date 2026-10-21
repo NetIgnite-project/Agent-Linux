@@ -1,15 +1,22 @@
 import { rm, stat, writeFile } from "node:fs/promises";
+import { MacFiles } from "../install/macos/macFiles";
 import { SystemFiles } from "../install/systemFiles";
+import { WindowsFiles } from "../install/windows/windowsFiles";
 import { AppConstants } from "../utils/constants";
 import { Logger } from "../utils/logger";
+import { Platform } from "../utils/platform";
 
 /**
  * Shutting down and rebooting the machine the agent runs on. Only these two fixed actions exist;
  * nothing the server sends ends up on a command line.
  *
- * The agent itself has no right to do either. It asks by creating a file in its runtime directory
- * (`/run/netignite-agent`, writable only by the service user); a `.path` unit that `install` sets
- * up sees the file and starts a root unit that runs `systemctl poweroff` or `systemctl reboot`.
+ * - **Linux**: the agent has no right to do either. It asks by creating a file in its runtime
+ *   directory (`/run/netignite-agent`, writable only by the service user); a `.path` unit that
+ *   `install` sets up sees the file and starts a root unit that runs `systemctl poweroff|reboot`.
+ * - **macOS**: the same with launchd: a file in `/usr/local/var/netignite-agent/<action>/`, and a
+ *   root daemon (`QueueDirectories`) that runs `/sbin/shutdown -h|-r now`.
+ * - **Windows**: the agent runs as LOCAL SERVICE, which may shut down, and runs `shutdown.exe`
+ *   with fixed arguments itself.
  */
 export class HostControl {
 	/** Time between answering the request and acting, so the answer reaches the server. */
@@ -24,6 +31,14 @@ export class HostControl {
 	 * this answer; the action itself runs only after answering.
 	 */
 	static async check(action: HostControl.Action): Promise<string | null> {
+		if (Platform.isWindows()) return null;
+		if (Platform.isMac()) {
+			const dir = MacFiles.requestDir(action);
+			return (await HostControl.exists(dir))
+				? null
+				: HostControl.notSetUp(action, `${dir} is missing`);
+		}
+
 		const unit = `${SystemFiles.powerUnitName(action)}.path`;
 		// Prints the state (also for a unit that doesn't exist: "inactive"); nothing if it can't ask.
 		const state = (await HostControl.output(["systemctl", "is-active", unit]))?.trim();
@@ -73,17 +88,21 @@ export class HostControl {
 	}
 
 	/**
-	 * Asks systemd for the action by creating its request file, and waits until the `.path` unit
-	 * picked it up (deleted it). If nothing does, removes the file again, so that it can't fire
-	 * later, and throws.
+	 * Linux and macOS: creates the action's request file and waits until the root unit picked it up
+	 * (deleted it). If nothing does, removes the file again, so that it can't fire later, and
+	 * throws. Windows: runs `shutdown.exe`.
 	 */
 	static async perform(
 		action: HostControl.Action,
 		options: { requestPath?: string; timeoutMs?: number } = {},
 	) {
-		const path = options.requestPath ?? SystemFiles.requestPath(action);
+		if (Platform.isWindows() && !options.requestPath) return await HostControl.runShutdownExe(action);
+
+		const path =
+			options.requestPath ??
+			(Platform.isMac() ? MacFiles.requestPath(action) : SystemFiles.requestPath(action));
 		const timeoutMs = options.timeoutMs ?? HostControl.PICKUP_TIMEOUT_MS;
-		Logger.warn(`Host control: ${action} requested by the server, asking systemd (${path})`);
+		Logger.warn(`Host control: ${action} requested by the server, asking the system (${path})`);
 
 		try {
 			await writeFile(path, `${new Date().toISOString()}\n`, { mode: 0o600 });
@@ -102,6 +121,21 @@ export class HostControl {
 		throw new Error(
 			HostControl.notSetUp(action, `nothing picked the request up within ${timeoutMs / 1000} s`),
 		);
+	}
+
+	private static async runShutdownExe(action: HostControl.Action) {
+		const argv = WindowsFiles.shutdownCommand(action);
+		Logger.warn(`Host control: ${action} requested by the server, running ${argv.join(" ")}`);
+		const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+		const [exitCode, stdout, stderr] = await Promise.all([
+			child.exited,
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+		]);
+		if (exitCode !== 0) {
+			const detail = (stderr.trim() || stdout.trim()).replace(/\s+/g, " ");
+			throw new Error(`shutdown.exe failed (exit ${exitCode})${detail ? `: ${detail}` : ""}`);
+		}
 	}
 
 	private static notSetUp(action: HostControl.Action, reason: string) {

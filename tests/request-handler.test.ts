@@ -9,6 +9,7 @@ import { SystemFiles } from "../src/install/systemFiles";
 import type { MacAddress } from "../src/net/macAddress";
 import { AgentProtocol } from "../src/protocol/agentProtocol";
 import { SshKeys } from "../src/ssh/sshKeys";
+import { AppConstants } from "../src/utils/constants";
 import { Logger } from "../src/utils/logger";
 import { makeTempDir, removeTempDir } from "./helpers/cli";
 import { ServerProtocol } from "./helpers/server-protocol";
@@ -536,7 +537,7 @@ describe("HostInfo", () => {
 			const hello = await HostInfo.hello({ wol, sshKeys: null });
 			const parsed = ServerProtocol.Hello.parse(hello);
 			expect(parsed.protocol).toBe(2);
-			expect(parsed.kind).toBe("linux");
+			expect(parsed.kind).toBe(AppConstants.AGENT_KIND);
 			expect(parsed.capabilities).toEqual(AgentProtocol.capabilities({ wol, ssh: false }));
 			expect(parsed.ssh_keys).toBeUndefined();
 			expect(parsed.info).toMatchObject({

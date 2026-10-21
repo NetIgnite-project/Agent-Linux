@@ -1,7 +1,10 @@
 import { CLIBaseCommand, CLICommandArg, type CLICommandArgParser } from "@cleverjs/cli";
 import { InstallPlan } from "../install/installPlan";
+import { MacFacts } from "../install/macos/macFacts";
+import { MacPlan } from "../install/macos/macPlan";
 import { PlanRunner } from "../install/planRunner";
 import { SystemFacts } from "../install/systemFacts";
+import { WindowsPlan } from "../install/windows/windowsPlan";
 import { CommandFlags, serviceConfigPath } from "../utils/commandFlags";
 import { AppConstants } from "../utils/constants";
 import { AppError, reportError } from "../utils/errors";
@@ -44,21 +47,22 @@ export class UninstallCMD extends CLIBaseCommand<typeof ARGS> {
 
 	private async uninstall(configFlag: string, purge: boolean, dryRun: boolean) {
 		if (!dryRun) {
-			const problem = Platform.requireLinuxRoot("uninstall");
+			const problem = Platform.requirePrivileges("uninstall");
 			if (problem) throw new AppError(problem);
 		}
 
-		const user = AppConstants.SERVICE_USER;
 		const configPath = serviceConfigPath(configFlag);
-		const facts = Platform.isLinux() ? await SystemFacts.gather(user) : { userExists: true };
-
-		const steps = InstallPlan.uninstall({
-			binaryTarget: AppConstants.INSTALL_BINARY_PATH,
-			configPath,
-			user,
-			purge,
-			facts,
-		});
+		const binaryTarget = AppConstants.INSTALL_BINARY_PATH;
+		let steps: InstallPlan.Step[];
+		if (Platform.isWindows()) {
+			steps = WindowsPlan.uninstall({ binaryTarget, configPath, purge });
+		} else if (Platform.isMac()) {
+			steps = MacPlan.uninstall({ binaryTarget, configPath, purge, facts: await MacFacts.gather() });
+		} else {
+			const user = AppConstants.SERVICE_USER;
+			const facts = Platform.isLinux() ? await SystemFacts.gather(user) : { userExists: true };
+			steps = InstallPlan.uninstall({ binaryTarget, configPath, user, purge, facts });
+		}
 
 		await PlanRunner.run(steps, { dryRun });
 		if (dryRun) return;
@@ -67,7 +71,9 @@ export class UninstallCMD extends CLIBaseCommand<typeof ARGS> {
 		Logger.info(
 			purge
 				? `Deleted ${configPath}. The agent stays registered in the dashboard; delete it there too.`
-				: `Kept ${configPath} (root-only). Delete it with: sudo rm ${configPath}`,
+				: Platform.isWindows()
+					? `Kept ${configPath} (administrators only). Delete it with: Remove-Item "${configPath}"`
+					: `Kept ${configPath} (root-only). Delete it with: sudo rm ${configPath}`,
 		);
 	}
 }

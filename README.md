@@ -1,30 +1,36 @@
-# NetIgnite Agent for Linux
+# NetIgnite Agent
 
-`netignite-agent` connects a Linux machine to a [NetIgnite](https://github.com/NetIgnite-project)
-server, so the dashboard can:
+`netignite-agent` connects a Linux, macOS or Windows machine to a
+[NetIgnite](https://github.com/NetIgnite-project) server, so the dashboard can:
 
-- **Host mode** (always on): show whether this machine is online, and **shut it down or reboot
-  it**.
-- **Wake-on-LAN mode** (optional): also **wake other devices** on this machine's network,
-  **check whether they are up** (ICMP ping, TCP port, IPv6 link-local via MAC), and **log in to
-  them over [SSH](#ssh)** to check them or **shut them down or reboot them**. This is what a
-  NetIgnite ESP32 agent does, on a machine you already have running (a Raspberry Pi, a NAS, a
-  home server).
+- **Host mode** (always on, every platform): show whether this machine is online, and **shut it
+  down or reboot it**.
+- **Wake-on-LAN mode** (optional, Linux only): also **wake other devices** on this machine's
+  network, **check whether they are up** (ICMP ping, TCP port, IPv6 link-local via MAC), and
+  **log in to them over [SSH](#ssh)** to shut them down or reboot them. This is what a NetIgnite
+  ESP32 agent does, on a machine you already have running (a Raspberry Pi, a NAS, a home server).
 
-It is a single binary that runs as a systemd service under its own unprivileged user. It talks to
-the server over one outgoing WebSocket (protocol v2). Nothing listens on this machine.
+It is a single binary that runs as a service under an account without rights to the machine:
+systemd on Linux, launchd on macOS ([macOS](#macos)), a scheduled task on Windows
+([Windows](#windows)). It talks to the server over one outgoing WebSocket (protocol v2). Nothing
+listens on this machine. This repository is still called Agent-Linux; the binaries for every
+platform are in its releases.
 
 ## Requirements
 
 - Linux with systemd (`install` sets up a systemd service). Nothing else is needed for shutdown
   and reboot: no polkit, no sudo.
 - Wake-on-LAN mode: `ping` (iputils or BusyBox) and `ip` (iproute2) for status checks.
+- macOS 13 or newer, Windows 10 or 11 (64-bit x86).
 
 | Binary | For |
 | --- | --- |
 | `netignite-agent-linux-x64` | x86-64 CPUs from about 2013 on (AVX2) |
 | `netignite-agent-linux-x64-baseline` | any x86-64 CPU; use it if the other one crashes with "Illegal instruction" |
 | `netignite-agent-linux-arm64` | 64-bit ARM, e.g. Raspberry Pi 3/4/5 with a 64-bit OS |
+| `netignite-agent-macos-arm64` | Macs with Apple silicon |
+| `netignite-agent-macos-x64` | Intel Macs |
+| `netignite-agent-windows-x64.exe` | Windows 10/11 on 64-bit x86 |
 
 ## Install
 
@@ -66,6 +72,63 @@ files' contents, without changing anything:
   (re)starts the service
 
 Check on it with `sudo netignite-agent status` and `journalctl -u netignite-agent -f`.
+
+## Windows
+
+In the dashboard, create an agent of type **Windows**; its page shows a PowerShell one-liner. Or by
+hand, in PowerShell opened with **Run as administrator**:
+
+```powershell
+.\netignite-agent-windows-x64.exe pair https://netignite.example.com netignite_enroll_…
+.\netignite-agent-windows-x64.exe install
+```
+
+`pair` writes `C:\ProgramData\NetIgnite\agent.json` and first restricts that folder to SYSTEM
+and Administrators (below ProgramData every user may read otherwise). `install`:
+
+- copies the binary to `C:\Program Files\NetIgnite\netignite-agent.exe`,
+- gives the account `LOCAL SERVICE` read access to the config folder and write access to its
+  `logs` folder (by SID, so translated account names don't matter),
+- registers the scheduled task **NetIgnite Agent**: started at boot as `LOCAL SERVICE`, restarted
+  once a minute if it stops, no time limit, also on battery,
+- starts it.
+
+`LOCAL SERVICE` has no rights to your files or the system, but it may shut the PC down, so the
+agent runs `shutdown.exe /s|/r /t 0 /d p:0:0` itself; there is nothing else it can run. It logs to
+`C:\ProgramData\NetIgnite\logs\agent.log` (1 MB, then `agent.log.1`). `netignite-agent status`
+shows the task's state, `uninstall [--purge]` removes it again. Wake-on-LAN mode isn't available
+on Windows.
+
+## macOS
+
+In the dashboard, create an agent of type **macOS**; its page shows a one-liner. Or by hand:
+
+```bash
+sudo ./netignite-agent-macos-arm64 pair https://netignite.example.com netignite_enroll_…
+sudo ./netignite-agent-macos-arm64 install
+```
+
+The config is `/usr/local/etc/netignite/agent.json`. `install`:
+
+- creates the hidden system user and group `_netignite` (id 400–499, no shell, no home),
+- copies the binary to `/usr/local/bin/netignite-agent`,
+- makes the config readable for `_netignite` only,
+- creates the request folders `/usr/local/var/netignite-agent/shutdown` and `…/reboot` (owned by
+  `_netignite`, mode 0700) and the log folder `/usr/local/var/log/netignite-agent`,
+- writes three launchd daemons to `/Library/LaunchDaemons`: `dev.netignite.agent` (the agent, as
+  `_netignite`, restarted by launchd), and `dev.netignite.agent.shutdown` /
+  `dev.netignite.agent.reboot` (root),
+- loads them with `launchctl bootstrap`.
+
+Shutdown and reboot work like on Linux: the agent has no right to either. It creates a file in its
+request folder; the root daemon for that action (launchd `QueueDirectories`) empties the folder
+and runs `/sbin/shutdown -h now` (or `-r now`) if the request is less than a minute old. Older
+requests (a power cut right after one, say) are only removed. The agent logs to
+`/usr/local/var/log/netignite-agent/agent.log`. Wake-on-LAN mode isn't available on macOS.
+
+The binaries aren't signed by Apple. macOS only runs Apple silicon binaries with a signature, so
+the install script signs the downloaded file ad hoc (`codesign --force --sign -`) after checking it
+against `SHA256SUMS`; do the same when you download one by hand.
 
 ## Pair
 

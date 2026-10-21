@@ -1,6 +1,7 @@
 import { chmod, chown, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { z } from "zod";
+import { WindowsFiles } from "../install/windows/windowsFiles";
 import { ServerUrl } from "../net/serverUrl";
 import { SshKeys } from "../ssh/sshKeys";
 import { AppConstants } from "../utils/constants";
@@ -76,7 +77,7 @@ export class AgentConfig {
 				);
 			}
 			if (code === "EACCES") {
-				throw new ConfigError(`Can't read ${path} (permission denied). Run it with sudo.`);
+				throw new ConfigError(`Can't read ${path} (permission denied). ${AgentConfig.elevateHint()}`);
 			}
 			throw error;
 		}
@@ -112,7 +113,7 @@ export class AgentConfig {
 	) {
 		const config = AgentConfig.parse(data);
 		const serviceUser = options.serviceUser ?? null;
-		const canChown = Platform.isLinux() && Platform.isRoot();
+		const canChown = (Platform.isLinux() || Platform.isMac()) && Platform.isRoot();
 
 		let previous: AgentConfig.Owner | null = null;
 		try {
@@ -140,12 +141,25 @@ export class AgentConfig {
 		}
 	}
 
-	/** Creates the config directory (0750); the service user's group may enter it. */
+	/**
+	 * Creates the config directory (0750); the service user's group may enter it. On Windows (as an
+	 * administrator) it is restricted to SYSTEM and Administrators before anything is written into
+	 * it: below ProgramData every user may read otherwise. `install` adds read access for the agent.
+	 */
 	private static async ensureDir(dir: string, serviceUser: AgentConfig.Owner | null) {
 		if (await Platform.exists(dir)) return;
 		await mkdir(dir, { recursive: true, mode: AgentConfig.DIR_MODE });
 		await chmod(dir, AgentConfig.DIR_MODE);
 		if (serviceUser) await chown(dir, 0, serviceUser.gid);
+		if (Platform.isWindows() && Platform.isAdmin()) {
+			const icacls = Bun.spawnSync(WindowsFiles.configAclAdminsOnly(dir), {
+				stdout: "ignore",
+				stderr: "pipe",
+			});
+			if (icacls.exitCode !== 0) {
+				throw new ConfigError(`Can't restrict access to ${dir}: ${icacls.stderr.toString().trim()}`);
+			}
+		}
 	}
 
 	/**
@@ -155,19 +169,21 @@ export class AgentConfig {
 	static async assertWritable(path: string) {
 		const probe = `${path}.${process.pid}.check`;
 		try {
-			if (!(await Platform.exists(dirname(path)))) {
-				await mkdir(dirname(path), { recursive: true, mode: AgentConfig.DIR_MODE });
-			}
+			await AgentConfig.ensureDir(dirname(path), null);
 			await writeFile(probe, "", { flag: "wx", mode: AgentConfig.FILE_MODE });
 			await rm(probe, { force: true });
 		} catch (error) {
 			const code = (error as NodeJS.ErrnoException).code;
 			if (code === "EACCES" || code === "EPERM") {
-				throw new ConfigError(`Can't write ${path} (permission denied). Run it with sudo.`);
+				throw new ConfigError(`Can't write ${path} (permission denied). ${AgentConfig.elevateHint()}`);
 			}
 			const reason = error instanceof Error ? error.message : String(error);
 			throw new ConfigError(`Can't write ${path}: ${reason}`);
 		}
+	}
+
+	private static elevateHint() {
+		return Platform.isWindows() ? "Run it as an administrator." : "Run it with sudo.";
 	}
 
 	/** The config with SSH keys: the existing ones, or new ones if it has none. */

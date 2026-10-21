@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { readFile, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { AgentConfig } from "../src/config/agentConfig";
 import { SystemFiles } from "../src/install/systemFiles";
+import { AppConstants } from "../src/utils/constants";
 import { finishCLI, makeTempDir, removeTempDir, runCLI, spawnCLI } from "./helpers/cli";
 import { FakeNetIgniteServer } from "./helpers/fake-server";
 
@@ -13,6 +14,8 @@ import { FakeNetIgniteServer } from "./helpers/fake-server";
  */
 
 const posixOnly = test.skipIf(process.platform === "win32");
+const linuxOnly = test.skipIf(process.platform !== "linux");
+const windowsOnly = test.skipIf(process.platform !== "win32");
 
 let server: FakeNetIgniteServer;
 let dir: string;
@@ -143,7 +146,7 @@ describe("run", () => {
 		try {
 			const connection = await server.waitForConnection(server.connections.length);
 			const hello = await connection.hello();
-			expect(hello.kind).toBe("linux");
+			expect(hello.kind).toBe(AppConstants.AGENT_KIND);
 			expect(hello.capabilities).toEqual(["host.status", "host.control"]);
 			expect(await connection.request("PING")).toMatchObject({ ok: true, p: {} });
 
@@ -175,7 +178,7 @@ describe("run", () => {
 		expect(result.output).toContain("401");
 	});
 
-	test("--wol turns on Wake-on-LAN mode for the run", async () => {
+	linuxOnly("--wol turns on Wake-on-LAN mode for the run", async () => {
 		const { path } = await pairNew("run-wol", 22);
 		const child = spawnCLI(["run", "--wol", "--config", path]);
 		try {
@@ -252,7 +255,7 @@ describe("other commands", () => {
 		expect(invalid.exitCode).toBe(1);
 	});
 
-	test("install --dry-run prints the plan and changes nothing", async () => {
+	linuxOnly("install --dry-run prints the systemd plan and changes nothing", async () => {
 		const watched = [
 			SystemFiles.UNIT_PATH,
 			...SystemFiles.powerUnitPaths(),
@@ -273,21 +276,50 @@ describe("other commands", () => {
 		expect(await Promise.all(watched.map(exists))).toEqual(before);
 	});
 
-	test("uninstall --purge --dry-run prints the plan", async () => {
+	windowsOnly("install --dry-run prints the Task Scheduler plan and changes nothing", async () => {
+		const { path } = await pairNew("install-windows", 41);
+		const result = await runCLI(["install", "--dry-run", "--config", path]);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("Dry run, nothing is changed");
+		expect(result.output).toContain("icacls");
+		expect(result.output).toContain("*S-1-5-19:(OI)(CI)RX");
+		expect(result.output).toContain("schtasks /Create /TN NetIgnite Agent /XML");
+		expect(result.output).toContain("<UserId>S-1-5-19</UserId>");
+		expect(result.output).toContain("<BootTrigger>");
+		expect(await exists(join(dirname(path), "task.xml"))).toBe(false);
+	});
+
+	linuxOnly("uninstall --purge --dry-run prints the systemd plan", async () => {
 		const result = await runCLI(["uninstall", "--purge", "--dry-run"]);
 		expect(result.exitCode).toBe(0);
 		expect(result.output).toContain("systemctl disable --now netignite-agent");
 		expect(result.output).toContain("remove /etc/netignite/agent.json");
 	});
 
-	test("install without --dry-run needs root on Linux", async () => {
-		if (process.platform === "linux" && process.getuid?.() === 0) return;
-		const result = await runCLI(["install"]);
-		expect(result.exitCode).toBe(1);
-		expect(result.output).toMatch(/needs Linux|must run as root/);
+	windowsOnly("uninstall --purge --dry-run prints the Task Scheduler plan", async () => {
+		const result = await runCLI(["uninstall", "--purge", "--dry-run"]);
+		expect(result.exitCode).toBe(0);
+		expect(result.output).toContain("schtasks /Delete /TN NetIgnite Agent /F");
+		expect(result.output).toContain(`remove ${AppConstants.DEFAULT_CONFIG_PATH}`);
 	});
 
-	test("wol-mode on adds SSH keys to a config from before 1.0.0", async () => {
+	test("install without --dry-run needs root or an administrator", async () => {
+		if (process.getuid?.() === 0) return;
+		const result = await runCLI(["install"]);
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toMatch(/must run as root|must run as an administrator/);
+	});
+
+	test("wol-mode on is refused where Wake-on-LAN mode can't run", async () => {
+		if (process.platform === "linux") return;
+		const { path } = await pairNew("wol-mode-elsewhere", 33);
+		const result = await runCLI(["wol-mode", "on", "--config", path]);
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain("needs Linux");
+		expect((await AgentConfig.load(path)).wol.enabled).toBe(false);
+	});
+
+	linuxOnly("wol-mode on adds SSH keys to a config from before 1.0.0", async () => {
 		const { path } = await pairNew("wol-mode-keys", 32);
 		const { ssh_keys: _, ...old } = JSON.parse(await readFile(path, "utf8"));
 		await writeFile(path, JSON.stringify(old));
@@ -297,7 +329,7 @@ describe("other commands", () => {
 		expect(config.ssh_keys).toBeDefined();
 	});
 
-	test("wol-mode switches Wake-on-LAN mode in the config", async () => {
+	linuxOnly("wol-mode switches Wake-on-LAN mode in the config", async () => {
 		const { path } = await pairNew("wol-mode", 31);
 		expect((await runCLI(["wol-mode", "on", "--config", path])).exitCode).toBe(0);
 		expect((await AgentConfig.load(path)).wol.enabled).toBe(true);

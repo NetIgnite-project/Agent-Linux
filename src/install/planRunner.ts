@@ -26,7 +26,7 @@ export class PlanRunner {
 		}
 		const content = step.content
 			.trimEnd()
-			.split("\n")
+			.split(/\r?\n/)
 			.map((line) => `      | ${line}`)
 			.join("\n");
 		Logger.info(`  ${description}\n${content}`);
@@ -40,7 +40,11 @@ export class PlanRunner {
 			case "write": {
 				// Write next to the target and rename, so a crash never leaves half a file.
 				const temp = `${step.path}.netignite-tmp`;
-				await writeFile(temp, step.content, { mode: step.mode });
+				const data =
+					step.encoding === "utf16le-bom"
+						? Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(step.content, "utf16le")])
+						: step.content;
+				await writeFile(temp, data, { mode: step.mode });
 				await chmod(temp, step.mode);
 				await rename(temp, step.path);
 				return;
@@ -51,7 +55,7 @@ export class PlanRunner {
 				const temp = `${step.to}.netignite-tmp`;
 				await copyFile(step.from, temp);
 				await chmod(temp, step.mode);
-				await rename(temp, step.to);
+				await PlanRunner.renameRetrying(temp, step.to);
 				return;
 			}
 
@@ -74,6 +78,23 @@ export class PlanRunner {
 					Logger.debug(`Kept ${step.path} (not empty)`);
 				}
 				return;
+		}
+	}
+
+	/**
+	 * Windows keeps a stopped program's file locked for a moment after `schtasks /End`, so a
+	 * rename over it is retried for up to 5 s.
+	 */
+	private static async renameRetrying(from: string, to: string) {
+		for (let attempt = 0; ; attempt++) {
+			try {
+				await rename(from, to);
+				return;
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException).code;
+				if (attempt >= 25 || !(code === "EBUSY" || code === "EPERM" || code === "EACCES")) throw error;
+				await Bun.sleep(200);
+			}
 		}
 	}
 

@@ -1,8 +1,13 @@
 import { CLIBaseCommand, CLICommandArg, type CLICommandArgParser } from "@cleverjs/cli";
 import { AgentConfig } from "../config/agentConfig";
 import { InstallPlan } from "../install/installPlan";
+import { MacFacts } from "../install/macos/macFacts";
+import { MacFiles } from "../install/macos/macFiles";
+import { MacPlan } from "../install/macos/macPlan";
 import { PlanRunner } from "../install/planRunner";
 import { SystemFacts } from "../install/systemFacts";
+import { WindowsFiles } from "../install/windows/windowsFiles";
+import { WindowsPlan } from "../install/windows/windowsPlan";
 import { CommandFlags, serviceConfigPath } from "../utils/commandFlags";
 import { AppConstants } from "../utils/constants";
 import { AppError, reportError } from "../utils/errors";
@@ -14,8 +19,13 @@ const ARGS = CLICommandArg.defineCLIArgSpecs({
 });
 
 /**
- * `install`: sets the agent up as the systemd service `netignite-agent`, running as the system
- * user `netignite`, plus the units that power off or reboot when the agent asks for it.
+ * `install`: sets the agent up as a service that starts with the machine.
+ *
+ * - Linux: the systemd service `netignite-agent` as the system user `netignite`, plus the units
+ *   that power off or reboot when the agent asks for it.
+ * - macOS: the launchd daemon `dev.netignite.agent` as the hidden user `_netignite`, plus a root
+ *   daemon per action.
+ * - Windows: the scheduled task "NetIgnite Agent", started at boot as LOCAL SERVICE.
  */
 export class InstallCMD extends CLIBaseCommand<typeof ARGS> {
 	static readonly ARGS = ARGS;
@@ -23,7 +33,8 @@ export class InstallCMD extends CLIBaseCommand<typeof ARGS> {
 	constructor() {
 		super({
 			name: "install",
-			description: "Install and start the systemd service (needs root and a paired config).",
+			description:
+				"Install and start the service (needs root or an administrator, and a paired config).",
 			args: ARGS,
 		});
 	}
@@ -39,13 +50,12 @@ export class InstallCMD extends CLIBaseCommand<typeof ARGS> {
 	}
 
 	private async install(configFlag: string, dryRun: boolean) {
-		const user = AppConstants.SERVICE_USER;
 		const configPath = serviceConfigPath(configFlag);
 
 		if (!dryRun) {
-			const problem = Platform.requireLinuxRoot("install");
+			const problem = Platform.requirePrivileges("install");
 			if (problem) throw new AppError(problem);
-			if (!(await SystemFacts.systemdRunning())) {
+			if (Platform.isLinux() && !(await SystemFacts.systemdRunning())) {
 				throw new AppError("systemd isn't running on this machine, so the service can't be installed.");
 			}
 			if (!Platform.isCompiledBinary()) {
@@ -69,14 +79,20 @@ export class InstallCMD extends CLIBaseCommand<typeof ARGS> {
 			if (!dryRun) throw error;
 			Logger.warn(`${error instanceof Error ? error.message : error} (ignored for --dry-run)`);
 		}
+		if (wol && !Platform.isLinux()) {
+			Logger.warn("Wake-on-LAN mode needs Linux; on this machine the agent runs in host mode.");
+		}
 
+		if (Platform.isWindows()) return await InstallCMD.installWindows(configPath, dryRun);
+		if (Platform.isMac()) return await InstallCMD.installMac(configPath, dryRun);
+		return await InstallCMD.installLinux(configPath, wol, dryRun);
+	}
+
+	private static async installLinux(configPath: string, wol: boolean, dryRun: boolean) {
+		const user = AppConstants.SERVICE_USER;
 		const facts = Platform.isLinux()
 			? await SystemFacts.gather(user)
-			: {
-					userExists: false,
-					groupExists: false,
-					nologinShell: "/usr/sbin/nologin",
-				};
+			: { userExists: false, groupExists: false, nologinShell: "/usr/sbin/nologin" };
 
 		const steps = InstallPlan.install({
 			binarySource: process.execPath,
@@ -95,6 +111,44 @@ export class InstallCMD extends CLIBaseCommand<typeof ARGS> {
 		);
 		Logger.info(
 			`Check it with: systemctl status ${AppConstants.SERVICE_NAME}  /  journalctl -u ${AppConstants.SERVICE_NAME} -f`,
+		);
+	}
+
+	private static async installMac(configPath: string, dryRun: boolean) {
+		const facts = await MacFacts.gather();
+		const steps = MacPlan.install({
+			binarySource: process.execPath,
+			binaryTarget: AppConstants.INSTALL_BINARY_PATH,
+			configPath,
+			facts,
+		});
+
+		await PlanRunner.run(steps, { dryRun });
+		if (dryRun) return;
+
+		Logger.info(
+			`Installed: the launchd daemon ${MacFiles.LABEL} runs as user ${MacFiles.SERVICE_USER}.`,
+		);
+		Logger.info(
+			`Check it with: sudo ${AppConstants.BINARY_NAME} status  /  log: ${MacFiles.logFile()}`,
+		);
+	}
+
+	private static async installWindows(configPath: string, dryRun: boolean) {
+		const steps = WindowsPlan.install({
+			binarySource: process.execPath,
+			binaryTarget: AppConstants.INSTALL_BINARY_PATH,
+			configPath,
+		});
+
+		await PlanRunner.run(steps, { dryRun });
+		if (dryRun) return;
+
+		Logger.info(
+			`Installed: the scheduled task "${WindowsFiles.TASK_NAME}" runs the agent as LOCAL SERVICE whenever Windows starts.`,
+		);
+		Logger.info(
+			`Check it with: ${AppConstants.BINARY_NAME} status  /  log: ${WindowsFiles.logFile(configPath)}`,
 		);
 	}
 }

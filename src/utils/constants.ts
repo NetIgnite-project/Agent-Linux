@@ -1,3 +1,8 @@
+import { Platform } from "./platform";
+
+const programData = process.env.ProgramData || "C:\\ProgramData";
+const programFiles = process.env.ProgramFiles || "C:\\Program Files";
+
 export namespace AppConstants {
 	export const APP_NAME = "NetIgnite Agent";
 
@@ -8,17 +13,24 @@ export namespace AppConstants {
 
 	export const BINARY_NAME = "netignite-agent";
 
-	/** The agent kind the server knows this agent as. */
-	export const AGENT_KIND = "linux";
+	/** The agent kind the server knows this agent as: `linux`, `windows` or `macos`. */
+	export const AGENT_KIND = Platform.kind();
 
-	export const DEFAULT_CONFIG_PATH = "/etc/netignite/agent.json";
+	export const DEFAULT_CONFIG_PATH = Platform.isWindows()
+		? `${programData}\\NetIgnite\\agent.json`
+		: Platform.isMac()
+			? "/usr/local/etc/netignite/agent.json"
+			: "/etc/netignite/agent.json";
 
 	/** Where `install` puts the binary the service runs. */
-	export const INSTALL_BINARY_PATH = "/usr/local/bin/netignite-agent";
+	export const INSTALL_BINARY_PATH = Platform.isWindows()
+		? `${programFiles}\\NetIgnite\\${BINARY_NAME}.exe`
+		: `/usr/local/bin/${BINARY_NAME}`;
 
+	/** Linux: the systemd unit, and its runtime directory. */
 	export const SERVICE_NAME = "netignite-agent";
 
-	/** System user the service runs as. */
+	/** Linux: the system user the service runs as. */
 	export const SERVICE_USER = "netignite";
 
 	/** The version baked in at compile time, or a dev placeholder under `bun run`. */

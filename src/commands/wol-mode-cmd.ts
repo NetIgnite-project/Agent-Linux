@@ -6,7 +6,7 @@ import { PlanRunner } from "../install/planRunner";
 import { SystemFacts } from "../install/systemFacts";
 import { CommandFlags, serviceConfigPath } from "../utils/commandFlags";
 import { AppConstants } from "../utils/constants";
-import { reportError } from "../utils/errors";
+import { AppError, reportError } from "../utils/errors";
 import { Logger } from "../utils/logger";
 import { Platform } from "../utils/platform";
 
@@ -46,6 +46,11 @@ export class WolModeCMD extends CLIBaseCommand<typeof ARGS> {
 	}
 
 	private async setMode(enabled: boolean, configFlag: string) {
+		if (enabled && !Platform.isLinux()) {
+			throw new AppError(
+				"Wake-on-LAN mode needs Linux (ping, ip and raw sockets); on this machine the agent runs in host mode only.",
+			);
+		}
 		const configPath = serviceConfigPath(configFlag);
 		const config = await AgentConfig.load(configPath);
 

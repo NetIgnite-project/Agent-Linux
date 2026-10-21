@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { Server, ServerWebSocket } from "bun";
+import { AppConstants } from "../../src/utils/constants";
 import { ServerProtocol } from "./server-protocol";
 
 type SocketData = { connection: FakeAgentConnection };
@@ -61,7 +62,7 @@ export class FakeNetIgniteServer {
 	}
 
 	/** Creates a single-use enrollment token like the dashboard does. */
-	addEnrollment(agentID: number, kind: "linux" | "esp32" = "linux") {
+	addEnrollment(agentID: number, kind: string = AppConstants.AGENT_KIND) {
 		const token = `netignite_enroll_${randomBytes(16).toString("hex")}:${randomBytes(32).toString("hex")}`;
 		this.enrollments.set(token, { agentID, kind, used: false });
 		return token;

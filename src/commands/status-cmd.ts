@@ -1,7 +1,11 @@
 import { CLIBaseCommand, CLICommandArg, type CLICommandArgParser } from "@cleverjs/cli";
 import { ConnectionCheck } from "../agent/connectionCheck";
 import { AgentConfig } from "../config/agentConfig";
+import { MacFacts } from "../install/macos/macFacts";
+import { MacFiles } from "../install/macos/macFiles";
 import { SystemFacts } from "../install/systemFacts";
+import { WindowsFacts } from "../install/windows/windowsFacts";
+import { WindowsFiles } from "../install/windows/windowsFiles";
 import { ServerUrl } from "../net/serverUrl";
 import { AgentProtocol } from "../protocol/agentProtocol";
 import { CommandFlags } from "../utils/commandFlags";
@@ -27,13 +31,21 @@ export class StatusCMD extends CLIBaseCommand<typeof ARGS> {
 		const configPath = args.flags.config;
 
 		let serviceActive = false;
-		if (Platform.isLinux() && (await SystemFacts.systemdRunning())) {
+		if (Platform.isWindows()) {
+			const state = await WindowsFacts.taskState();
+			serviceActive = state === "Running";
+			Logger.log(`Service:      ${state} (scheduled task "${WindowsFiles.TASK_NAME}")`);
+		} else if (Platform.isMac()) {
+			const state = await MacFacts.serviceState();
+			serviceActive = state === "running";
+			Logger.log(`Service:      ${state} (launchd ${MacFiles.LABEL})`);
+		} else if (Platform.isLinux() && (await SystemFacts.systemdRunning())) {
 			const state = await SystemFacts.serviceState();
 			serviceActive = state.active === "active";
 			Logger.log(`Service:      ${state.active} (${state.enabled})`);
 		} else {
 			Logger.log(
-				`Service:      not available (needs Linux with systemd, this is ${process.platform})`,
+				`Service:      not available (needs Linux with systemd, macOS or Windows; this is ${process.platform})`,
 			);
 		}
 

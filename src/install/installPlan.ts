@@ -163,7 +163,8 @@ export class InstallPlan {
 export namespace InstallPlan {
 	export type Step =
 		| { type: "run"; argv: string[]; ignoreFailure?: boolean }
-		| { type: "write"; path: string; content: string; mode: number }
+		/** `utf16le-bom`: Windows' Task Scheduler wants its XML that way. Default UTF-8. */
+		| { type: "write"; path: string; content: string; mode: number; encoding?: "utf16le-bom" }
 		| { type: "copy"; from: string; to: string; mode: number }
 		| { type: "mkdir"; path: string; mode: number }
 		| { type: "remove"; path: string }

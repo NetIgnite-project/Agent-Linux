@@ -5,6 +5,7 @@ import { AgentConfig, ConfigError } from "../src/config/agentConfig";
 import { Enrollment, EnrollmentError } from "../src/enroll/enrollment";
 import { SystemFacts } from "../src/install/systemFacts";
 import { ServerUrl } from "../src/net/serverUrl";
+import { AppConstants } from "../src/utils/constants";
 import { makeTempDir, removeTempDir } from "./helpers/cli";
 import { ServerProtocol } from "./helpers/server-protocol";
 
@@ -163,12 +164,12 @@ describe("Enrollment", () => {
 			success: true,
 			code: 200,
 			message: "Agent enrolled",
-			data: { agent_id: 3, kind: "linux", token_id: "tok123" },
+			data: { agent_id: 3, kind: AppConstants.AGENT_KIND, token_id: "tok123" },
 		});
 		const secret = Enrollment.generateSecret();
 
 		const result = await Enrollment.enroll(server, token, secret, fetchImpl);
-		expect(result).toEqual({ agent_id: 3, kind: "linux", token_id: "tok123" });
+		expect(result).toEqual({ agent_id: 3, kind: AppConstants.AGENT_KIND, token_id: "tok123" });
 
 		expect(calls).toHaveLength(1);
 		expect(calls[0]?.url).toBe("https://netignite.example.com/sub/api/v1/agents/enroll");
@@ -176,7 +177,7 @@ describe("Enrollment", () => {
 		expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
 			enrollment_token: token,
 			secret,
-			kind: "linux",
+			kind: AppConstants.AGENT_KIND,
 		});
 	});
 

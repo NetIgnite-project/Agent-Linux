@@ -2,20 +2,17 @@ import { AppConstants } from "../../src/utils/constants";
 
 /**
  * The compile engine: wraps `bun build --compile --sourcemap --minify --bytecode` and injects
- * `APP_VERSION` via `--define`. Targets: linux-x64 (modern), linux-x64-baseline, linux-arm64.
- * The binary name comes from `AppConstants.BINARY_NAME`. See docs/11-cli-and-infra.md.
+ * `APP_VERSION` via `--define`. Targets: linux-x64 (modern), linux-x64-baseline, linux-arm64,
+ * windows-x64 and macos-x64 (baseline builds: they also run on CPUs without AVX2), macos-arm64.
+ * The binary name comes from `AppConstants.BINARY_NAME`; Bun adds `.exe` for Windows.
  */
 export enum Platforms {
 	"linux-x64" = "bun-linux-x64-modern",
 	"linux-x64-baseline" = "bun-linux-x64-baseline",
 	"linux-arm64" = "bun-linux-arm64",
-
-	// "win-x64" = "bun-windows-x64-modern",
-	// "win-x64-baseline" = "bun-windows-x64-baseline",
-
-	// "macos-x64" = "bun-darwin-x64-modern",
-	// "macos-x64-baseline" = "bun-darwin-x64-baseline",
-	// "macos-arm64" = "bun-darwin-arm64"
+	"windows-x64" = "bun-windows-x64-baseline",
+	"macos-x64" = "bun-darwin-x64-baseline",
+	"macos-arm64" = "bun-darwin-arm64",
 }
 
 export type PlatformArg = keyof typeof Platforms | "auto";
