@@ -7,21 +7,14 @@ import { SystemFiles } from "./systemFiles";
 /** Looks at the system (read-only) for `install`, `uninstall`, `pair` and `status`. */
 export class SystemFacts {
 	static readonly NOLOGIN_SHELLS = ["/usr/sbin/nologin", "/sbin/nologin", "/usr/bin/nologin"];
-	static readonly POLKITD_PATHS = [
-		"/usr/lib/polkit-1/polkitd",
-		"/usr/libexec/polkitd",
-		"/usr/libexec/polkit-1/polkitd",
-		"/usr/lib/polkit/polkitd",
-	];
 
 	static async gather(user: string): Promise<InstallPlan.Facts> {
-		const [userExists, groupExists, nologinShell, legacyPolkit] = await Promise.all([
+		const [userExists, groupExists, nologinShell] = await Promise.all([
 			SystemFacts.succeeds(["getent", "passwd", user]),
 			SystemFacts.succeeds(["getent", "group", user]),
 			SystemFacts.nologinShell(),
-			Platform.exists(SystemFiles.POLKIT_LEGACY_DIR),
 		]);
-		return { userExists, groupExists, nologinShell, legacyPolkit };
+		return { userExists, groupExists, nologinShell };
 	}
 
 	/** uid and gid of a user, or null if it doesn't exist (or this isn't Linux). */
@@ -44,14 +37,6 @@ export class SystemFacts {
 	/** Whether systemd is the init system (same check as `sd_booted()`). */
 	static systemdRunning() {
 		return Platform.exists("/run/systemd/system");
-	}
-
-	static async polkitInstalled() {
-		if (Bun.which("pkaction")) return true;
-		for (const path of SystemFacts.POLKITD_PATHS) {
-			if (await Platform.exists(path)) return true;
-		}
-		return false;
 	}
 
 	static unitInstalled() {

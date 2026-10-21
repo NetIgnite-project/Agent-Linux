@@ -7,8 +7,10 @@ import { SystemFiles } from "./systemFiles";
  * list is pure (tested); {@link PlanRunner} executes or prints it.
  */
 export class InstallPlan {
-	static readonly POLKIT_RULES_DIR = posix.dirname(SystemFiles.POLKIT_RULES_PATH);
-	static readonly POLKIT_PKLA_DIR = posix.dirname(SystemFiles.POLKIT_PKLA_PATH);
+	/** The .path units that turn the agent's requests into a shutdown or reboot. */
+	static powerPathUnits() {
+		return SystemFiles.actions().map((action) => `${SystemFiles.powerUnitName(action)}.path`);
+	}
 
 	static install(options: InstallPlan.InstallOptions): InstallPlan.Step[] {
 		const { user, facts } = options;
@@ -59,29 +61,30 @@ export class InstallPlan {
 			mode: 0o644,
 		});
 
-		steps.push(
-			{ type: "mkdir", path: InstallPlan.POLKIT_RULES_DIR, mode: 0o755 },
-			{
-				type: "write",
-				path: SystemFiles.POLKIT_RULES_PATH,
-				content: SystemFiles.polkitRules(user),
-				mode: 0o644,
-			},
-		);
-		if (facts.legacyPolkit) {
+		for (const action of SystemFiles.actions()) {
+			const name = SystemFiles.powerUnitName(action);
 			steps.push(
-				{ type: "mkdir", path: InstallPlan.POLKIT_PKLA_DIR, mode: 0o755 },
 				{
 					type: "write",
-					path: SystemFiles.POLKIT_PKLA_PATH,
-					content: SystemFiles.polkitPkla(user),
+					path: `${SystemFiles.UNIT_DIR}/${name}.path`,
+					content: SystemFiles.powerPathUnit(action),
+					mode: 0o644,
+				},
+				{
+					type: "write",
+					path: `${SystemFiles.UNIT_DIR}/${name}.service`,
+					content: SystemFiles.powerServiceUnit(action),
 					mode: 0o644,
 				},
 			);
 		}
+		// Earlier versions used polkit for shutdown and reboot.
+		for (const path of SystemFiles.LEGACY_POLKIT_FILES) steps.push({ type: "remove", path });
 
 		steps.push(
 			{ type: "run", argv: ["systemctl", "daemon-reload"] },
+			// Watching before the agent (re)starts, so its first request is picked up.
+			{ type: "run", argv: ["systemctl", "enable", "--now", ...InstallPlan.powerPathUnits()] },
 			{ type: "run", argv: ["systemctl", "enable", service] },
 			// restart instead of `enable --now`: it also picks up a new binary or config.
 			{ type: "run", argv: ["systemctl", "restart", service] },
@@ -97,10 +100,15 @@ export class InstallPlan {
 
 		const steps: InstallPlan.Step[] = [
 			{ type: "run", argv: ["systemctl", "disable", "--now", service], ignoreFailure: true },
+			{
+				type: "run",
+				argv: ["systemctl", "disable", "--now", ...InstallPlan.powerPathUnits()],
+				ignoreFailure: true,
+			},
 			{ type: "remove", path: SystemFiles.UNIT_PATH },
+			...SystemFiles.powerUnitPaths().map((path): InstallPlan.Step => ({ type: "remove", path })),
 			{ type: "run", argv: ["systemctl", "daemon-reload"], ignoreFailure: true },
-			{ type: "remove", path: SystemFiles.POLKIT_RULES_PATH },
-			{ type: "remove", path: SystemFiles.POLKIT_PKLA_PATH },
+			...SystemFiles.LEGACY_POLKIT_FILES.map((path): InstallPlan.Step => ({ type: "remove", path })),
 		];
 
 		if (options.purge) {
@@ -168,8 +176,6 @@ export namespace InstallPlan {
 		groupExists: boolean;
 		/** `/usr/sbin/nologin` or wherever the system has it. */
 		nologinShell: string;
-		/** polkit < 0.106, which needs a `.pkla` file. */
-		legacyPolkit: boolean;
 	};
 
 	export type InstallOptions = {

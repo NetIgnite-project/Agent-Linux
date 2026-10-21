@@ -241,7 +241,7 @@ describe("other commands", () => {
 	test("install --dry-run prints the plan and changes nothing", async () => {
 		const watched = [
 			SystemFiles.UNIT_PATH,
-			SystemFiles.POLKIT_RULES_PATH,
+			...SystemFiles.powerUnitPaths(),
 			"/usr/local/bin/netignite-agent",
 		];
 		const before = await Promise.all(watched.map(exists));
@@ -252,8 +252,9 @@ describe("other commands", () => {
 		expect(result.output).toContain("useradd --system");
 		expect(result.output).toContain(`write  ${SystemFiles.UNIT_PATH}`);
 		expect(result.output).toContain("| User=netignite");
-		expect(result.output).toContain(`write  ${SystemFiles.POLKIT_RULES_PATH}`);
-		expect(result.output).toContain("org.freedesktop.login1.power-off");
+		expect(result.output).toContain(`write  ${SystemFiles.powerUnitPaths()[0]}`);
+		expect(result.output).toContain("| PathExists=/run/netignite-agent/shutdown");
+		expect(result.output).toContain("| ExecStart=systemctl --no-block poweroff");
 		expect(result.output).toContain("systemctl enable netignite-agent");
 		expect(await Promise.all(watched.map(exists))).toEqual(before);
 	});

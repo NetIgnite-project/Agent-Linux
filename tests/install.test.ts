@@ -13,7 +13,6 @@ const FACTS: InstallPlan.Facts = {
 	userExists: false,
 	groupExists: false,
 	nologinShell: "/usr/sbin/nologin",
-	legacyPolkit: false,
 };
 
 const INSTALL: InstallPlan.InstallOptions = {
@@ -105,6 +104,25 @@ describe("SystemFiles.unit", () => {
 		);
 	});
 
+	test("gets a runtime directory only its user can write to, for shutdown and reboot requests", () => {
+		expect(lines(unit)).toEqual(
+			expect.arrayContaining(["RuntimeDirectory=netignite-agent", "RuntimeDirectoryMode=0700"]),
+		);
+		expect(SystemFiles.RUNTIME_DIR).toBe("/run/netignite-agent");
+	});
+
+	test("refuses odd user names", () => {
+		const base = {
+			binaryPath: "/usr/local/bin/netignite-agent",
+			configPath: "/etc/netignite/agent.json",
+			wol: false,
+		};
+		expect(() => SystemFiles.unit({ ...base, user: "x\nExecStartPre=/bin/sh" })).toThrow(
+			"Invalid user name",
+		);
+		expect(() => SystemFiles.unit({ ...base, user: "Root" })).toThrow("Invalid user name");
+	});
+
 	test("the config path can be read back from the unit", () => {
 		expect(SystemFiles.unitConfigPath(unit)).toBe("/etc/netignite/agent.json");
 		expect(SystemFiles.unitConfigPath("[Service]\nExecStart=/bin/true\n")).toBeNull();
@@ -131,67 +149,53 @@ describe("SystemFiles.unit", () => {
 	});
 });
 
-describe("SystemFiles polkit", () => {
-	const rules = SystemFiles.polkitRules("netignite");
-
-	test("allows exactly power-off and reboot for the service user", () => {
-		const actions = [...rules.matchAll(/"(org\.freedesktop\.[^"]+)"/g)].map((m) => m[1]);
-		expect(actions.sort()).toEqual([
-			"org.freedesktop.login1.power-off",
-			"org.freedesktop.login1.power-off-multiple-sessions",
-			"org.freedesktop.login1.reboot",
-			"org.freedesktop.login1.reboot-multiple-sessions",
-		]);
-		expect(rules).toContain('subject.user == "netignite"');
-		expect(rules).toContain("polkit.Result.YES");
-		// No blanket permissions, no ignoring of inhibitors (e.g. a running package upgrade).
-		expect(rules).not.toContain("ignore-inhibit");
-		expect(rules).not.toContain("subject.isInGroup");
-		expect(rules).not.toContain("org.freedesktop.systemd1");
-		expect(rules.match(/polkit\.Result\./g)).toHaveLength(1);
-	});
-
-	test("is valid ES5 JavaScript that grants only the listed actions", () => {
-		let rule: ((action: { id: string }, subject: { user: string }) => unknown) | null = null;
-		const polkit = {
-			Result: { YES: "yes" },
-			addRule: (fn: typeof rule) => {
-				rule = fn;
-			},
-		};
-		new Function("polkit", rules)(polkit);
-		const check = rule as unknown as (action: { id: string }, subject: { user: string }) => unknown;
-
-		expect(check({ id: "org.freedesktop.login1.power-off" }, { user: "netignite" })).toBe("yes");
-		expect(check({ id: "org.freedesktop.login1.reboot" }, { user: "netignite" })).toBe("yes");
-		expect(check({ id: "org.freedesktop.login1.power-off" }, { user: "alice" })).toBeUndefined();
-		expect(
-			check({ id: "org.freedesktop.login1.power-off-ignore-inhibit" }, { user: "netignite" }),
-		).toBeUndefined();
-		expect(
-			check({ id: "org.freedesktop.systemd1.manage-units" }, { user: "netignite" }),
-		).toBeUndefined();
-	});
-
-	test("the legacy .pkla grants the same actions", () => {
-		const pkla = SystemFiles.polkitPkla("netignite");
-		expect(lines(pkla)).toEqual(
+describe("SystemFiles power units", () => {
+	test("a request file in the runtime directory starts the matching root unit", () => {
+		expect(lines(SystemFiles.powerPathUnit("shutdown"))).toEqual(
 			expect.arrayContaining([
-				"Identity=unix-user:netignite",
-				`Action=${SystemFiles.POWER_ACTIONS.join(";")}`,
-				"ResultAny=yes",
+				"[Path]",
+				"PathExists=/run/netignite-agent/shutdown",
+				"Unit=netignite-agent-shutdown.service",
+				"WantedBy=multi-user.target",
 			]),
 		);
+		expect(lines(SystemFiles.powerPathUnit("reboot"))).toEqual(
+			expect.arrayContaining([
+				"PathExists=/run/netignite-agent/reboot",
+				"Unit=netignite-agent-reboot.service",
+			]),
+		);
+		// Removing the file (or the directory, when the agent stops) must not trigger anything.
+		expect(SystemFiles.powerPathUnit("shutdown")).not.toMatch(/^Path(Changed|Modified)=/m);
 	});
 
-	test("refuses odd user names", () => {
-		expect(() => SystemFiles.polkitRules('x" || true || "')).toThrow("Invalid user name");
-		expect(() => SystemFiles.polkitPkla("Root")).toThrow("Invalid user name");
+	test("the root unit removes the request, then powers off or reboots, and does nothing else", () => {
+		const execs = (action: "shutdown" | "reboot") =>
+			lines(SystemFiles.powerServiceUnit(action)).filter((line) => line.startsWith("Exec"));
+		expect(execs("shutdown")).toEqual([
+			"ExecStart=rm -f /run/netignite-agent/shutdown",
+			"ExecStart=systemctl --no-block poweroff",
+		]);
+		expect(execs("reboot")).toEqual([
+			"ExecStart=rm -f /run/netignite-agent/reboot",
+			"ExecStart=systemctl --no-block reboot",
+		]);
+		expect(lines(SystemFiles.powerServiceUnit("shutdown"))).toContain("Type=oneshot");
+		expect(SystemFiles.powerServiceUnit("shutdown")).not.toContain("User=");
+	});
+
+	test("unit file paths", () => {
+		expect(SystemFiles.powerUnitPaths()).toEqual([
+			"/etc/systemd/system/netignite-agent-shutdown.path",
+			"/etc/systemd/system/netignite-agent-shutdown.service",
+			"/etc/systemd/system/netignite-agent-reboot.path",
+			"/etc/systemd/system/netignite-agent-reboot.service",
+		]);
 	});
 });
 
 describe("InstallPlan.install", () => {
-	test("creates the user, installs binary, config permissions, unit and polkit rule, then starts", () => {
+	test("creates the user, installs binary, config permissions and units, then starts", () => {
 		const steps = InstallPlan.install(INSTALL);
 
 		expect(runArgv(steps)).toEqual([
@@ -201,6 +205,7 @@ describe("InstallPlan.install", () => {
 			"chown netignite:netignite /etc/netignite/agent.json",
 			"chmod 0600 /etc/netignite/agent.json",
 			"systemctl daemon-reload",
+			"systemctl enable --now netignite-agent-shutdown.path netignite-agent-reboot.path",
 			"systemctl enable netignite-agent",
 			"systemctl restart netignite-agent",
 		]);
@@ -216,9 +221,18 @@ describe("InstallPlan.install", () => {
 		expect(unit?.mode).toBe(0o644);
 		expect(unit?.content).toContain("User=netignite");
 
-		const rules = written(steps, "/etc/polkit-1/rules.d/50-netignite-agent.rules");
-		expect(rules?.content).toBe(SystemFiles.polkitRules("netignite"));
-		expect(written(steps, SystemFiles.POLKIT_PKLA_PATH)).toBeNull();
+		expect(written(steps, "/etc/systemd/system/netignite-agent-shutdown.path")?.content).toBe(
+			SystemFiles.powerPathUnit("shutdown"),
+		);
+		expect(written(steps, "/etc/systemd/system/netignite-agent-reboot.service")?.content).toBe(
+			SystemFiles.powerServiceUnit("reboot"),
+		);
+		for (const path of SystemFiles.powerUnitPaths()) expect(written(steps, path)?.mode).toBe(0o644);
+
+		// polkit rules of earlier versions go away.
+		const removed = steps.flatMap((s) => (s.type === "remove" ? [s.path] : []));
+		expect(removed).toEqual([...SystemFiles.LEGACY_POLKIT_FILES]);
+		expect(steps.some((s) => s.type === "write" && s.path.includes("polkit"))).toBe(false);
 
 		// The unit is in place before systemd reloads and starts it.
 		const unitIndex = steps.indexOf(unit as InstallPlan.Step);
@@ -239,15 +253,8 @@ describe("InstallPlan.install", () => {
 		expect(runArgv(withGroup)[0]).toContain("--gid netignite netignite");
 	});
 
-	test("writes a .pkla for old polkit and a WOL unit in Wake-on-LAN mode", () => {
-		const steps = InstallPlan.install({
-			...INSTALL,
-			wol: true,
-			facts: { ...FACTS, legacyPolkit: true },
-		});
-		expect(written(steps, SystemFiles.POLKIT_PKLA_PATH)?.content).toBe(
-			SystemFiles.polkitPkla("netignite"),
-		);
+	test("writes a Wake-on-LAN unit in Wake-on-LAN mode", () => {
+		const steps = InstallPlan.install({ ...INSTALL, wol: true });
 		expect(written(steps, SystemFiles.UNIT_PATH)?.content).toContain(
 			"AmbientCapabilities=CAP_NET_RAW",
 		);
@@ -267,6 +274,7 @@ describe("InstallPlan.uninstall", () => {
 		const steps = InstallPlan.uninstall(options);
 		expect(runArgv(steps)).toEqual([
 			"systemctl disable --now netignite-agent",
+			"systemctl disable --now netignite-agent-shutdown.path netignite-agent-reboot.path",
 			"systemctl daemon-reload",
 			"chown root:root /etc/netignite",
 			"chmod 0700 /etc/netignite",
@@ -277,8 +285,8 @@ describe("InstallPlan.uninstall", () => {
 		const removed = steps.flatMap((s) => (s.type === "remove" ? [s.path] : []));
 		expect(removed).toEqual([
 			SystemFiles.UNIT_PATH,
-			SystemFiles.POLKIT_RULES_PATH,
-			SystemFiles.POLKIT_PKLA_PATH,
+			...SystemFiles.powerUnitPaths(),
+			...SystemFiles.LEGACY_POLKIT_FILES,
 			"/usr/local/bin/netignite-agent",
 		]);
 		expect(removed).not.toContain("/etc/netignite/agent.json");
@@ -325,22 +333,28 @@ describe("PlanRunner", () => {
 
 	test("the full install plan as a dry run touches nothing either", async () => {
 		const before = await Promise.all(
-			[SystemFiles.UNIT_PATH, SystemFiles.POLKIT_RULES_PATH, "/usr/local/bin/netignite-agent"].map(
-				(path) =>
-					stat(path).then(
-						() => true,
-						() => false,
-					),
+			[
+				SystemFiles.UNIT_PATH,
+				"/etc/systemd/system/netignite-agent-shutdown.path",
+				"/usr/local/bin/netignite-agent",
+			].map((path) =>
+				stat(path).then(
+					() => true,
+					() => false,
+				),
 			),
 		);
 		await PlanRunner.run(InstallPlan.install(INSTALL), { dryRun: true });
 		const after = await Promise.all(
-			[SystemFiles.UNIT_PATH, SystemFiles.POLKIT_RULES_PATH, "/usr/local/bin/netignite-agent"].map(
-				(path) =>
-					stat(path).then(
-						() => true,
-						() => false,
-					),
+			[
+				SystemFiles.UNIT_PATH,
+				"/etc/systemd/system/netignite-agent-shutdown.path",
+				"/usr/local/bin/netignite-agent",
+			].map((path) =>
+				stat(path).then(
+					() => true,
+					() => false,
+				),
 			),
 		);
 		expect(after).toEqual(before);

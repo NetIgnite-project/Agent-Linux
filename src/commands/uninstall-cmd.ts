@@ -20,7 +20,7 @@ const ARGS = CLICommandArg.defineCLIArgSpecs({
 	],
 });
 
-/** `uninstall`: removes the service, polkit rule, service user and binary. Keeps the config unless `--purge`. */
+/** `uninstall`: removes the service and its power units, service user and binary. Keeps the config unless `--purge`. */
 export class UninstallCMD extends CLIBaseCommand<typeof ARGS> {
 	static readonly ARGS = ARGS;
 

@@ -15,7 +15,7 @@ const ARGS = CLICommandArg.defineCLIArgSpecs({
 
 /**
  * `install`: sets the agent up as the systemd service `netignite-agent`, running as the system
- * user `netignite`, with a polkit rule that lets that user power off and reboot.
+ * user `netignite`, plus the units that power off or reboot when the agent asks for it.
  */
 export class InstallCMD extends CLIBaseCommand<typeof ARGS> {
 	static readonly ARGS = ARGS;
@@ -69,7 +69,6 @@ export class InstallCMD extends CLIBaseCommand<typeof ARGS> {
 					userExists: false,
 					groupExists: false,
 					nologinShell: "/usr/sbin/nologin",
-					legacyPolkit: false,
 				};
 
 		const steps = InstallPlan.install({
@@ -80,12 +79,6 @@ export class InstallCMD extends CLIBaseCommand<typeof ARGS> {
 			wol,
 			facts,
 		});
-
-		if (Platform.isLinux() && !(await SystemFacts.polkitInstalled())) {
-			Logger.warn(
-				"polkit doesn't seem to be installed. The agent will run, but shutdown and reboot from the dashboard fail until it is (Debian/Ubuntu: apt install polkitd, Fedora: dnf install polkit).",
-			);
-		}
 
 		await PlanRunner.run(steps, { dryRun });
 		if (dryRun) return;

@@ -1,12 +1,16 @@
 import { describe, expect, test } from "bun:test";
+import { rm } from "node:fs/promises";
 import type { NetworkInterfaceInfo } from "node:os";
+import { join } from "node:path";
 import { utils } from "ssh2";
 import { HostControl } from "../src/agent/hostControl";
 import { HostInfo } from "../src/agent/hostInfo";
 import { RequestHandler } from "../src/agent/requestHandler";
+import { SystemFiles } from "../src/install/systemFiles";
 import type { MacAddress } from "../src/net/macAddress";
 import { AgentProtocol } from "../src/protocol/agentProtocol";
 import { Logger } from "../src/utils/logger";
+import { makeTempDir, removeTempDir } from "./helpers/cli";
 import { ServerProtocol } from "./helpers/server-protocol";
 
 Logger.setLogLevel("critical");
@@ -113,14 +117,14 @@ describe("RequestHandler", () => {
 			expect(calls.sshExec).toEqual([]);
 		});
 
-		test("HOST_CONTROL is refused with logind's reason when it isn't allowed", async () => {
+		test("HOST_CONTROL is refused with the check's reason when it isn't possible", async () => {
 			const { handler, calls } = makeHandler({
 				hostControlCheck: async (action) =>
-					HostControl.describeAnswer(action, action === "shutdown" ? 's "challenge"' : 's "yes"'),
+					action === "shutdown" ? "apt blocks shutdown and reboot right now" : null,
 			});
 			const refused = await handler.handle("HOST_CONTROL", { action: "shutdown" });
 			expect(refused.ok).toBe(false);
-			expect(errorOf(refused)).toContain("polkit rule");
+			expect(errorOf(refused)).toContain("apt blocks shutdown");
 			const allowed = await handler.handle("HOST_CONTROL", { action: "reboot" });
 			expect(allowed.ok).toBe(true);
 			if (allowed.ok) allowed.afterSend?.();
@@ -269,9 +273,9 @@ describe("RequestHandler", () => {
 			expect(calls.hostControl).toEqual([]);
 		});
 
-		test("runs only the two fixed systemctl commands", () => {
-			expect(HostControl.command("shutdown")).toEqual(["systemctl", "--no-ask-password", "poweroff"]);
-			expect(HostControl.command("reboot")).toEqual(["systemctl", "--no-ask-password", "reboot"]);
+		test("asks systemd through one fixed request file per action", () => {
+			expect(SystemFiles.requestPath("shutdown")).toBe("/run/netignite-agent/shutdown");
+			expect(SystemFiles.requestPath("reboot")).toBe("/run/netignite-agent/reboot");
 			expect(HostControl.DELAY_MS).toBe(1000);
 		});
 	});
@@ -505,14 +509,61 @@ describe("HostInfo", () => {
 	});
 });
 
-describe("HostControl.describeAnswer", () => {
-	test("maps logind's CanPowerOff/CanReboot answers", () => {
-		expect(HostControl.describeAnswer("shutdown", 's "yes"\n')).toBeNull();
-		expect(HostControl.describeAnswer("reboot", 's "challenge"\n')).toContain("polkit rule");
-		expect(HostControl.describeAnswer("shutdown", 's "no"\n')).toContain(
-			"doesn't let the agent shut down",
-		);
-		expect(HostControl.describeAnswer("reboot", 's "na"\n')).toContain("can't reboot");
-		expect(HostControl.describeAnswer("reboot", "")).toBeNull();
+describe("HostControl", () => {
+	test("finds block inhibitors for shutdowns in logind's ListInhibitors answer", () => {
+		const answer = (inhibitors: unknown[]) =>
+			JSON.stringify({ type: "a(ssssuu)", data: [inhibitors] });
+
+		expect(HostControl.blockingInhibitor(answer([]))).toBeNull();
+		// Delay inhibitors only postpone the shutdown; sleep and idle blockers don't matter.
+		expect(
+			HostControl.blockingInhibitor(
+				answer([
+					["shutdown:sleep", "Unattended Upgrades Shutdown", "Stop ongoing upgrades", "delay", 0, 808],
+					["sleep:idle", "GNOME", "Playing a video", "block", 1000, 1500],
+				]),
+			),
+		).toBeNull();
+		expect(
+			HostControl.blockingInhibitor(
+				answer([["sleep:shutdown", "apt", "Installing packages", "block", 0, 1234]]),
+			),
+		).toEqual({ who: "apt", why: "Installing packages" });
+		expect(HostControl.blockingInhibitor("not json")).toBeNull();
+		expect(HostControl.blockingInhibitor('{"data":[]}')).toBeNull();
+	});
+
+	test("execute returns once the .path unit picked the request up", async () => {
+		const dir = await makeTempDir();
+		try {
+			const requestPath = join(dir, "shutdown");
+			// Stands in for netignite-agent-shutdown.service, which removes the request first.
+			const pickUp = (async () => {
+				while (!(await Bun.file(requestPath).exists())) await Bun.sleep(20);
+				await rm(requestPath);
+			})();
+			await HostControl.execute("shutdown", { requestPath, timeoutMs: 3000 });
+			await pickUp;
+		} finally {
+			await removeTempDir(dir);
+		}
+	});
+
+	test("execute fails and removes the request when nothing picks it up", async () => {
+		const dir = await makeTempDir();
+		try {
+			const requestPath = join(dir, "reboot");
+			await expect(HostControl.execute("reboot", { requestPath, timeoutMs: 300 })).rejects.toThrow(
+				"nothing picked the request up",
+			);
+			// A request left behind would reboot the machine whenever the unit becomes active.
+			expect(await Bun.file(requestPath).exists()).toBe(false);
+
+			await expect(
+				HostControl.execute("reboot", { requestPath: join(dir, "missing", "reboot") }),
+			).rejects.toThrow("can't create");
+		} finally {
+			await removeTempDir(dir);
+		}
 	});
 });

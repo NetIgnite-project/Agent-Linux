@@ -1,15 +1,27 @@
 import { posix } from "node:path";
+import type { HostControl } from "../agent/hostControl";
 import { AppConstants } from "../utils/constants";
 import { AppError } from "../utils/errors";
 
 /** Contents of the files `install` writes. Pure functions, so they can be tested. */
 export class SystemFiles {
-	static readonly UNIT_PATH = `/etc/systemd/system/${AppConstants.SERVICE_NAME}.service`;
-	static readonly POLKIT_RULES_PATH = `/etc/polkit-1/rules.d/50-${AppConstants.SERVICE_NAME}.rules`;
-	/** polkit < 0.106 (Debian 11, Ubuntu ≤ 22.10) reads `.pkla` files instead of JavaScript rules. */
-	static readonly POLKIT_LEGACY_DIR = "/etc/polkit-1/localauthority";
-	static readonly POLKIT_PKLA_PATH =
-		`/etc/polkit-1/localauthority/50-local.d/50-${AppConstants.SERVICE_NAME}.pkla`;
+	static readonly UNIT_DIR = "/etc/systemd/system";
+	static readonly UNIT_PATH = `${SystemFiles.UNIT_DIR}/${AppConstants.SERVICE_NAME}.service`;
+
+	/**
+	 * The service's `RuntimeDirectory=` (a tmpfs, owned by the service user, mode 0700). The agent
+	 * asks for a shutdown or reboot by creating a file here; nobody but that user and root can.
+	 */
+	static readonly RUNTIME_DIR = `/run/${AppConstants.SERVICE_NAME}`;
+
+	/** The two fixed actions and the `systemctl` verb behind each. */
+	static readonly POWER_ACTIONS = { shutdown: "poweroff", reboot: "reboot" } as const;
+
+	/** polkit rules written by versions before 1.0.0; `install` and `uninstall` remove them. */
+	static readonly LEGACY_POLKIT_FILES = [
+		`/etc/polkit-1/rules.d/50-${AppConstants.SERVICE_NAME}.rules`,
+		`/etc/polkit-1/localauthority/50-local.d/50-${AppConstants.SERVICE_NAME}.pkla`,
+	] as const;
 
 	/**
 	 * Exit status of `run` when the server rejected the credential (EX_CONFIG). The unit doesn't
@@ -17,18 +29,27 @@ export class SystemFiles {
 	 */
 	static readonly EXIT_CREDENTIAL_REJECTED = 78;
 
-	/**
-	 * The logind actions behind `systemctl poweroff` and `systemctl reboot`, and nothing else.
-	 * `*-multiple-sessions` is checked when other users are logged in (e.g. over SSH). The
-	 * `*-ignore-inhibit` actions are left out on purpose: a block inhibitor (a running package
-	 * upgrade, for example) keeps stopping a remote shutdown.
-	 */
-	static readonly POWER_ACTIONS = [
-		"org.freedesktop.login1.power-off",
-		"org.freedesktop.login1.power-off-multiple-sessions",
-		"org.freedesktop.login1.reboot",
-		"org.freedesktop.login1.reboot-multiple-sessions",
-	] as const;
+	/** The file the agent creates to ask for `action`. */
+	static requestPath(action: HostControl.Action) {
+		return `${SystemFiles.RUNTIME_DIR}/${action}`;
+	}
+
+	/** `netignite-agent-shutdown` / `netignite-agent-reboot`: the name of its .path and .service. */
+	static powerUnitName(action: HostControl.Action) {
+		return `${AppConstants.SERVICE_NAME}-${action}`;
+	}
+
+	/** The .path and .service unit files of both actions. */
+	static powerUnitPaths() {
+		return SystemFiles.actions().flatMap((action) => [
+			`${SystemFiles.UNIT_DIR}/${SystemFiles.powerUnitName(action)}.path`,
+			`${SystemFiles.UNIT_DIR}/${SystemFiles.powerUnitName(action)}.service`,
+		]);
+	}
+
+	static actions() {
+		return Object.keys(SystemFiles.POWER_ACTIONS) as HostControl.Action[];
+	}
 
 	/** `ProtectHome=yes` hides these from the service, so the config can't live there. */
 	static readonly HIDDEN_FROM_SERVICE = ["/home", "/root", "/run/user"];
@@ -43,6 +64,7 @@ export class SystemFiles {
 	}
 
 	static unit(options: SystemFiles.UnitOptions) {
+		SystemFiles.assertSafeUser(options.user);
 		SystemFiles.assertSafePath(options.binaryPath, "binary");
 		SystemFiles.assertSafePath(options.configPath, "config");
 		const hidden = SystemFiles.HIDDEN_FROM_SERVICE.find(
@@ -80,11 +102,15 @@ export class SystemFiles {
 			`RestartPreventExitStatus=${SystemFiles.EXIT_CREDENTIAL_REJECTED}`,
 			"TimeoutStopSec=10",
 			"",
-			"# Hardening. The agent talks to the server, sends Wake-on-LAN packets, runs ping and ip, and",
-			"# runs `systemctl poweroff|reboot`. Those go to logind over D-Bus and polkit allows them (see",
-			`# ${SystemFiles.POLKIT_RULES_PATH}), so NoNewPrivileges= doesn't get in the way: only setuid`,
-			"# helpers such as sudo or pkexec would need new privileges. The seccomp-based options below",
-			"# imply NoNewPrivileges= for a service with User= anyway. The agent never writes to the disk.",
+			"# Shutdown and reboot: the agent creates shutdown or reboot in its RuntimeDirectory, and",
+			`# ${SystemFiles.powerUnitName("shutdown")}.path / ${SystemFiles.powerUnitName("reboot")}.path start a root unit that runs`,
+			"# systemctl poweroff|reboot. The agent itself needs no privileges for it.",
+			`RuntimeDirectory=${AppConstants.SERVICE_NAME}`,
+			"RuntimeDirectoryMode=0700",
+			"",
+			"# Hardening. The agent talks to the server, sends Wake-on-LAN packets and runs ping and ip.",
+			"# It writes nothing but the requests above (ProtectSystem=strict keeps RuntimeDirectory=",
+			"# writable).",
 			"NoNewPrivileges=yes",
 			"ProtectSystem=strict",
 			"ProtectHome=yes",
@@ -117,39 +143,46 @@ export class SystemFiles {
 		return /^ExecStart=\S+ run --config (\S+)\s*$/m.exec(unitText)?.[1] ?? null;
 	}
 
-	/** polkit ≥ 0.106 rule (ES5: older polkit versions use an old JavaScript engine). */
-	static polkitRules(user: string) {
-		SystemFiles.assertSafeUser(user);
-		const actions = SystemFiles.POWER_ACTIONS.map((action) => `\t\t"${action}"`).join(",\n");
-
+	/**
+	 * Starts the action's root unit when the agent creates its request file. `PathExists=` doesn't
+	 * fire when the file (or the whole RuntimeDirectory, when the agent stops) is removed.
+	 */
+	static powerPathUnit(action: HostControl.Action) {
+		const name = SystemFiles.powerUnitName(action);
 		return [
-			`// Written by \`${AppConstants.BINARY_NAME} install\`: lets the ${AppConstants.APP_NAME}`,
-			`// service user "${user}" power off and reboot this machine, and nothing else.`,
-			"polkit.addRule(function (action, subject) {",
-			"\tvar allowed = [",
-			actions,
-			"\t];",
-			`\tif (subject.user == "${user}" && allowed.indexOf(action.id) >= 0) {`,
-			"\t\treturn polkit.Result.YES;",
-			"\t}",
-			"});",
+			`# Written by \`${AppConstants.BINARY_NAME} install\`: starts ${name}.service when the`,
+			`# ${AppConstants.APP_NAME} asks for a ${action} by creating ${SystemFiles.requestPath(action)}.`,
+			`# Only the agent's user and root can write to ${SystemFiles.RUNTIME_DIR}.`,
+			"[Unit]",
+			`Description=${AppConstants.APP_NAME}: ${action} requests`,
+			"Documentation=https://github.com/NetIgnite-project/Agent-Linux",
+			"",
+			"[Path]",
+			`PathExists=${SystemFiles.requestPath(action)}`,
+			`Unit=${name}.service`,
+			"",
+			"[Install]",
+			"WantedBy=multi-user.target",
 			"",
 		].join("\n");
 	}
 
-	/** The same permission for polkit < 0.106. */
-	static polkitPkla(user: string) {
-		SystemFiles.assertSafeUser(user);
-
+	/** Runs `systemctl poweroff|reboot` as root, and nothing else. */
+	static powerServiceUnit(action: HostControl.Action) {
+		const name = SystemFiles.powerUnitName(action);
+		const description = action === "shutdown" ? "shut down" : "reboot";
 		return [
-			`# Written by \`${AppConstants.BINARY_NAME} install\`: lets the ${AppConstants.APP_NAME}`,
-			`# service user "${user}" power off and reboot this machine, and nothing else.`,
-			`[${AppConstants.APP_NAME} power control]`,
-			`Identity=unix-user:${user}`,
-			`Action=${SystemFiles.POWER_ACTIONS.join(";")}`,
-			"ResultAny=yes",
-			"ResultInactive=yes",
-			"ResultActive=yes",
+			`# Written by \`${AppConstants.BINARY_NAME} install\`: the ${action} the ${AppConstants.APP_NAME} asked for`,
+			`# (see ${name}.path).`,
+			"[Unit]",
+			`Description=${AppConstants.APP_NAME}: ${description} this machine`,
+			"Documentation=https://github.com/NetIgnite-project/Agent-Linux",
+			"",
+			"[Service]",
+			"Type=oneshot",
+			"# Remove the request first: while it exists, the .path unit would start this unit again.",
+			`ExecStart=rm -f ${SystemFiles.requestPath(action)}`,
+			`ExecStart=systemctl --no-block ${SystemFiles.POWER_ACTIONS[action]}`,
 			"",
 		].join("\n");
 	}
