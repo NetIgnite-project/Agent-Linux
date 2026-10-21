@@ -1,6 +1,15 @@
 # Changelog
 
-## 1.0.0-beta.1 (unreleased)
+## 1.0.0 (2026-10-21)
+
+The first stable release of the NetIgnite agent for Linux, for NetIgnite server 2.0.0 or newer. No
+changes since 1.0.0-beta.1; everything it can do is listed below.
+
+Install it from the dashboard: create a Linux agent and run the command its page shows,
+`curl -fsSL https://<server>/install/linux.sh | sudo sh -s -- <token>`. It replaces the v1
+"server" agent, which can't connect to a v2 server.
+
+## 1.0.0-beta.1 (2026-10-21)
 
 The first release of the NetIgnite agent for Linux, for NetIgnite server 2.0.0-beta.2 or newer.
 

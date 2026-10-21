@@ -83,8 +83,7 @@ sudo netignite-agent pair <server-url> <enrollment-token> [--wol] [--config <pat
 - Pairing again (new token from the dashboard) replaces the credential. The server disconnects the
   old one, and an installed service is restarted with the new one.
 - An ESP32 agent's token is refused, and stays valid for that ESP32: create a Linux agent for this
-  machine instead. (Servers before 2.0.0-beta.2 don't check the agent kind first; with them the
-  ESP32's credential is already replaced, so set the ESP32 up again.)
+  machine instead.
 
 ## Wake-on-LAN mode
 
