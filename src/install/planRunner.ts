@@ -1,6 +1,9 @@
+import { spawn } from "node:child_process";
 import { chmod, copyFile, mkdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { win32 } from "node:path";
 import { AppError } from "../utils/errors";
 import { Logger } from "../utils/logger";
+import { Platform } from "../utils/platform";
 import { InstallPlan } from "./installPlan";
 
 /** Executes an {@link InstallPlan} (or, for `--dry-run`, only prints it). */
@@ -68,6 +71,12 @@ export class PlanRunner {
 				return;
 
 			case "remove":
+				if (PlanRunner.isOwnBinary(step.path)) {
+					// `uninstall` run from the installed binary: Windows can't delete a running program.
+					PlanRunner.removeAfterExit(step.path);
+					Logger.info(`${step.path} is deleted when this command has finished.`);
+					return;
+				}
 				await rm(step.path, { force: true });
 				return;
 
@@ -96,6 +105,37 @@ export class PlanRunner {
 				await Bun.sleep(200);
 			}
 		}
+	}
+
+	private static isOwnBinary(path: string) {
+		return (
+			Platform.isWindows() &&
+			win32.resolve(path).toLowerCase() === win32.resolve(process.execPath).toLowerCase()
+		);
+	}
+
+	/**
+	 * Windows: deletes a program's file (and its folder, if then empty) as soon as it isn't running
+	 * anymore, trying once a second for a minute. A detached `cmd.exe` does it: it outlives this
+	 * process (a detached PowerShell doesn't start without a console).
+	 */
+	static removeAfterExit(path: string) {
+		// Fixed install paths; anything cmd would interpret is left to the user.
+		if (/["%^&|<>!()]/.test(path)) {
+			Logger.warn(`Delete ${path} by hand.`);
+			return;
+		}
+		const file = `"${path}"`;
+		const command =
+			`(for /l %i in (1,1,60) do @if exist ${file} (del /f /q ${file} >nul 2>&1 & ` +
+			`if exist ${file} ping -n 2 127.0.0.1 >nul)) & rmdir "${win32.dirname(path)}" >nul 2>&1`;
+		const cmd = win32.join(process.env.SystemRoot ?? "C:\\Windows", "System32\\cmd.exe");
+		spawn(cmd, ["/d", "/c", command], {
+			detached: true,
+			stdio: "ignore",
+			windowsHide: true,
+			windowsVerbatimArguments: true,
+		}).unref();
 	}
 
 	private static async runCommand(argv: string[], ignoreFailure: boolean) {

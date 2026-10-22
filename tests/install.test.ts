@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { InstallPlan } from "../src/install/installPlan";
 import { PlanRunner } from "../src/install/planRunner";
@@ -381,6 +381,39 @@ describe("PlanRunner", () => {
 		expect(await readFile(target, "utf8")).toBe("binary v2");
 		expect((await readdir(dir)).some((name) => name.includes("netignite-tmp"))).toBe(false);
 	});
+
+	test.skipIf(process.platform !== "win32")(
+		"Windows: deletes a running program and its folder once it has exited",
+		async () => {
+			const exists = (path: string) =>
+				stat(path).then(
+					() => true,
+					() => false,
+				);
+			// With a space, like "C:\Program Files\NetIgnite".
+			const folder = join(dir, "running program");
+			const program = join(folder, "program.exe");
+			await mkdir(folder);
+			await copyFile(join(process.env.SystemRoot ?? "C:\\Windows", "System32", "ping.exe"), program);
+			const child = Bun.spawn([program, "-n", "3", "127.0.0.1"], {
+				stdout: "ignore",
+				stderr: "ignore",
+			});
+			await Bun.sleep(300);
+			// The reason uninstall needs this: Windows refuses to delete a running program.
+			await expect(rm(program, { force: true })).rejects.toThrow();
+
+			PlanRunner.removeAfterExit(program);
+			await Bun.sleep(500);
+			expect(await exists(program)).toBe(true);
+
+			await child.exited;
+			for (let i = 0; i < 50 && (await exists(folder)); i++) await Bun.sleep(200);
+			expect(await exists(program)).toBe(false);
+			expect(await exists(folder)).toBe(false);
+		},
+		20_000,
+	);
 
 	test("a failing command stops the plan unless it may fail", async () => {
 		const path = join(dir, "after-failure");
