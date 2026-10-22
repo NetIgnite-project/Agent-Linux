@@ -34,8 +34,8 @@ platform are in its releases.
 
 ## Install
 
-1. In the dashboard, create an agent of type **Linux**. Its page shows a pair command with a
-   single-use enrollment token (valid 15 minutes).
+1. In the dashboard, create an agent of the kind **Linux agent**. Its page shows a pair command
+   with a single-use enrollment token (valid 15 minutes).
 2. Download the binary and check it:
 
    ```bash
@@ -75,8 +75,8 @@ Check on it with `sudo netignite-agent status` and `journalctl -u netignite-agen
 
 ## Windows
 
-In the dashboard, create an agent of type **Windows**; its page shows a PowerShell one-liner. Or by
-hand, in PowerShell opened with **Run as administrator**:
+In the dashboard, create an agent of the kind **Windows agent**; its page shows a PowerShell
+one-liner. Or by hand, in PowerShell opened with **Run as administrator**:
 
 ```powershell
 .\netignite-agent-windows-x64.exe pair https://netignite.example.com netignite_enroll_…
@@ -101,7 +101,8 @@ on Windows.
 
 ## macOS
 
-In the dashboard, create an agent of type **macOS**; its page shows a one-liner. Or by hand:
+In the dashboard, create an agent of the kind **macOS agent**; its page shows a one-liner. Or by
+hand:
 
 ```bash
 sudo ./netignite-agent-macos-arm64 pair https://netignite.example.com netignite_enroll_…
