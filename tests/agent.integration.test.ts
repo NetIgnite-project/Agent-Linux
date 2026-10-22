@@ -393,7 +393,7 @@ describe("SSH requests", () => {
 		expect(ssh.connections).toBe(0);
 	});
 
-	test("without SSH keys (a config from before 1.0.0): no ssh.power, and the error says what to do", async () => {
+	test("without SSH keys (a config from 1.0.0 or older): no ssh.power, and the error says what to do", async () => {
 		const { connection, hello } = await sshAgent({ ssh_keys: undefined });
 		expect(hello.capabilities).not.toContain("ssh.power");
 		const check = await connection.request("SSH_CHECK", target());

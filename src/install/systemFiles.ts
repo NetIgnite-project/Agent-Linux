@@ -17,7 +17,7 @@ export class SystemFiles {
 	/** The two fixed actions and the `systemctl` verb behind each. */
 	static readonly POWER_ACTIONS = { shutdown: "poweroff", reboot: "reboot" } as const;
 
-	/** polkit rules written by versions before 1.0.0; `install` and `uninstall` remove them. */
+	/** polkit rules written by versions up to 1.0.0; `install` and `uninstall` remove them. */
 	static readonly LEGACY_POLKIT_FILES = [
 		`/etc/polkit-1/rules.d/50-${AppConstants.SERVICE_NAME}.rules`,
 		`/etc/polkit-1/localauthority/50-local.d/50-${AppConstants.SERVICE_NAME}.pkla`,

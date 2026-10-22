@@ -69,7 +69,7 @@ export class InstallCMD extends CLIBaseCommand<typeof ARGS> {
 		try {
 			const loaded = await AgentConfig.load(configPath);
 			wol = loaded.wol.enabled;
-			// Configs from before 1.0.0 have no SSH keys; the service can't write them itself.
+			// Configs from 1.0.0 and older have no SSH keys; the service can't write them itself.
 			const { config, created } = AgentConfig.withSshKeys(loaded);
 			if (created && !dryRun) {
 				await AgentConfig.save(configPath, config);

@@ -67,7 +67,7 @@ files' contents, without changing anything:
 - writes `/etc/systemd/system/netignite-agent.service`
 - writes the shutdown and reboot units `netignite-agent-shutdown.path`/`.service` and
   `netignite-agent-reboot.path`/`.service` (see [Shutdown and reboot](#shutdown-and-reboot))
-- removes the polkit rule of versions before 1.0.0, if there is one
+- removes the polkit rule of versions up to 1.0.0, if there is one
 - runs `systemctl daemon-reload`, enables and starts the two `.path` units, then enables and
   (re)starts the service
 
@@ -347,7 +347,7 @@ block inhibitors (`ListInhibitors`): while something such as a package upgrade b
 the dashboard says so and nothing happens. When the agent stops, systemd deletes its runtime
 directory, and a pending request with it.
 
-Versions before 1.0.0 used a polkit rule instead, which failed on machines without polkit
+Versions up to 1.0.0 used a polkit rule instead, which failed on machines without polkit
 ("Access denied"). `install` removes that rule.
 
 ## Development

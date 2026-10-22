@@ -298,6 +298,8 @@ export class AgentClient {
 	 */
 	static async probeUpgrade(wsUrl: string, credential: string): Promise<number | null> {
 		const key = Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64");
+		const controller = new AbortController();
+		const timer = setTimeout(() => controller.abort(), AgentClient.PROBE_TIMEOUT_MS);
 		try {
 			const response = await fetch(wsUrl.replace(/^ws/, "http"), {
 				headers: {
@@ -309,13 +311,17 @@ export class AgentClient {
 					"User-Agent": AgentClient.userAgent(),
 				},
 				redirect: "manual",
-				signal: AbortSignal.timeout(AgentClient.PROBE_TIMEOUT_MS),
+				signal: controller.signal,
 			});
-			await response.body?.cancel().catch(() => {});
 			return response.status;
 		} catch (error) {
 			Logger.debug("Upgrade probe failed:", error);
 			return null;
+		} finally {
+			clearTimeout(timer);
+			// After a 101 the upgraded connection stays open (on Linux it kept `status` alive until
+			// the timeout): close it.
+			controller.abort();
 		}
 	}
 

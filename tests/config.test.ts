@@ -5,6 +5,7 @@ import { AgentConfig, ConfigError } from "../src/config/agentConfig";
 import { Enrollment, EnrollmentError } from "../src/enroll/enrollment";
 import { SystemFacts } from "../src/install/systemFacts";
 import { ServerUrl } from "../src/net/serverUrl";
+import { SshKeys } from "../src/ssh/sshKeys";
 import { AppConstants } from "../src/utils/constants";
 import { makeTempDir, removeTempDir } from "./helpers/cli";
 import { ServerProtocol } from "./helpers/server-protocol";
@@ -44,6 +45,16 @@ describe("AgentConfig", () => {
 		expect(() => AgentConfig.parse(null)).toThrow(ConfigError);
 	});
 
+	test("unusable SSH keys count as none, so the agent still starts", () => {
+		const keys = SshKeys.generate(VALID.agent_id);
+		expect(AgentConfig.parse({ ...VALID, ssh_keys: keys }).ssh_keys).toEqual(keys);
+		const broken = { ...keys, reboot: "-----BEGIN OPENSSH PRIVATE KEY-----\nnope\n" };
+		expect(AgentConfig.parse({ ...VALID, ssh_keys: broken }).ssh_keys).toBeUndefined();
+		expect(AgentConfig.withSshKeys(AgentConfig.parse({ ...VALID, ssh_keys: broken })).created).toBe(
+			true,
+		);
+	});
+
 	test("builds the bearer credential", () => {
 		expect(AgentConfig.credential(VALID)).toBe(`netignite_agent_a1b2c3d4e5f6:${"f".repeat(64)}`);
 	});
@@ -79,6 +90,19 @@ describe("AgentConfig", () => {
 		await AgentConfig.save(path, VALID);
 		expect((await stat(path)).mode & 0o777).toBe(0o600);
 	});
+
+	posixOnly(
+		"missing parents stay passable for the service user (/usr/local/etc on a new Mac)",
+		async () => {
+			const path = join(dir, "parents", "etc", "netignite", "agent.json");
+			await AgentConfig.save(path, VALID);
+			for (const parent of [join(dir, "parents"), join(dir, "parents", "etc")]) {
+				// Others may enter and list (whatever the umask adds for the group).
+				expect((await stat(parent)).mode & 0o005).toBe(0o005);
+			}
+			expect((await stat(join(dir, "parents", "etc", "netignite"))).mode & 0o777).toBe(0o750);
+		},
+	);
 
 	test("owner: the service user if it exists, else the previous owner", () => {
 		const service = { uid: 990, gid: 985 };

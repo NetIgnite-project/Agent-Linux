@@ -24,11 +24,21 @@ export class SshKeys {
 		return `SHA256:${hash.replace(/=+$/, "")}`;
 	}
 
-	/** Two new key pairs, as unencrypted OpenSSH private keys (what `ssh-keygen -N ""` writes). */
+	/**
+	 * Two new key pairs, as unencrypted OpenSSH private keys (what `ssh-keygen -N ""` writes).
+	 * ssh2 (1.17) drops the leading byte of a public key that starts with 0x00, about 1 key in
+	 * 256: such a key doesn't parse, so it is made again.
+	 */
 	static generate(agentID: number): SshKeys.PrivateKeys {
-		const key = (action: SshKeys.Action) =>
-			utils.generateKeyPairSync("ed25519", { comment: `netignite-agent-${agentID}-${action}` })
-				.private;
+		const key = (action: SshKeys.Action) => {
+			for (let attempt = 0; attempt < 20; attempt++) {
+				const generated = utils.generateKeyPairSync("ed25519", {
+					comment: `netignite-agent-${agentID}-${action}`,
+				}).private;
+				if (SshKeys.isUsablePrivateKey(generated)) return generated;
+			}
+			throw new Error("Couldn't generate an SSH key");
+		};
 		return { shutdown: key("shutdown"), reboot: key("reboot") };
 	}
 

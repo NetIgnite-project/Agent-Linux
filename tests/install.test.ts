@@ -382,6 +382,18 @@ describe("PlanRunner", () => {
 		expect((await readdir(dir)).some((name) => name.includes("netignite-tmp"))).toBe(false);
 	});
 
+	test.skipIf(process.platform === "win32")(
+		"mkdir: missing parents stay passable, the directory gets its mode (/usr/local/var/log on a new Mac)",
+		async () => {
+			const leaf = join(dir, "var", "log", "netignite-agent");
+			await PlanRunner.run([{ type: "mkdir", path: leaf, mode: 0o700 }], { dryRun: false });
+			for (const parent of [join(dir, "var"), join(dir, "var", "log")]) {
+				expect((await stat(parent)).mode & 0o005).toBe(0o005);
+			}
+			expect((await stat(leaf)).mode & 0o777).toBe(0o700);
+		},
+	);
+
 	test.skipIf(process.platform !== "win32")(
 		"Windows: deletes a running program and its folder once it has exited",
 		async () => {

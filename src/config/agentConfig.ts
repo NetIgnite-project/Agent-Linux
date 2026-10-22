@@ -46,12 +46,15 @@ export class AgentConfig {
 			.regex(/^[^:\s]+$/, "Invalid token id"),
 		secret: z.string().regex(AgentConfig.SECRET_PATTERN, "Invalid secret"),
 		wol: z.object({ enabled: z.boolean() }).default({ enabled: false }),
+		// Unusable keys count as none: the agent still runs (without SSH), and `install`,
+		// `pair` or `wol-mode on` create new ones.
 		ssh_keys: z
 			.object({
-				shutdown: z.string().refine(SshKeys.isUsablePrivateKey, "Invalid SSH key"),
-				reboot: z.string().refine(SshKeys.isUsablePrivateKey, "Invalid SSH key"),
+				shutdown: z.string().refine(SshKeys.isUsablePrivateKey),
+				reboot: z.string().refine(SshKeys.isUsablePrivateKey),
 			})
-			.optional(),
+			.optional()
+			.catch(undefined),
 	});
 
 	/** Validates parsed JSON. */
@@ -148,7 +151,9 @@ export class AgentConfig {
 	 */
 	private static async ensureDir(dir: string, serviceUser: AgentConfig.Owner | null) {
 		if (await Platform.exists(dir)) return;
-		await mkdir(dir, { recursive: true, mode: AgentConfig.DIR_MODE });
+		// Missing parents (/usr/local/etc on a new Mac) get 0755: the service user must pass through.
+		await mkdir(dirname(dir), { recursive: true, mode: 0o755 });
+		await mkdir(dir, { mode: AgentConfig.DIR_MODE });
 		await chmod(dir, AgentConfig.DIR_MODE);
 		if (serviceUser) await chown(dir, 0, serviceUser.gid);
 		if (Platform.isWindows() && Platform.isAdmin()) {

@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { AgentConfig } from "../src/config/agentConfig";
 import { SystemFiles } from "../src/install/systemFiles";
 import { AppConstants } from "../src/utils/constants";
+import { Platform } from "../src/utils/platform";
 import { finishCLI, makeTempDir, removeTempDir, runCLI, spawnCLI } from "./helpers/cli";
 import { FakeNetIgniteServer } from "./helpers/fake-server";
 
@@ -304,7 +305,8 @@ describe("other commands", () => {
 	});
 
 	test("install without --dry-run needs root or an administrator", async () => {
-		if (process.getuid?.() === 0) return;
+		// Root, or an elevated Windows prompt (like GitHub's Windows runners), gets past the check.
+		if (process.getuid?.() === 0 || Platform.isAdmin()) return;
 		const result = await runCLI(["install"]);
 		expect(result.exitCode).toBe(1);
 		expect(result.output).toMatch(/must run as root|must run as an administrator/);
@@ -319,7 +321,7 @@ describe("other commands", () => {
 		expect((await AgentConfig.load(path)).wol.enabled).toBe(false);
 	});
 
-	linuxOnly("wol-mode on adds SSH keys to a config from before 1.0.0", async () => {
+	linuxOnly("wol-mode on adds SSH keys to a config from 1.0.0 or older", async () => {
 		const { path } = await pairNew("wol-mode-keys", 32);
 		const { ssh_keys: _, ...old } = JSON.parse(await readFile(path, "utf8"));
 		await writeFile(path, JSON.stringify(old));

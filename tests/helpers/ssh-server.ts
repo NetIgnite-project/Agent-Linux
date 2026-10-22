@@ -8,7 +8,7 @@ import { type AuthContext, type Connection, type ParsedKey, Server, utils } from
  * that a rejected host key got no credentials.
  */
 export class TestSshServer {
-	readonly hostKey = utils.generateKeyPairSync("ed25519");
+	readonly hostKey = TestSshServer.newHostKey();
 	/** `ssh-keygen -lf` of the host key, computed independently of the agent's code. */
 	readonly fingerprint: string;
 
@@ -37,6 +37,14 @@ export class TestSshServer {
 			if (key instanceof Error) throw key;
 			return key;
 		});
+	}
+
+	/** ssh2 breaks about 1 Ed25519 key in 256 (see SshKeys.generate): take one that parses. */
+	private static newHostKey() {
+		for (;;) {
+			const key = utils.generateKeyPairSync("ed25519");
+			if (!(utils.parseKey(key.public) instanceof Error)) return key;
+		}
 	}
 
 	get methods() {

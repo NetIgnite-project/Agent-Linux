@@ -19,7 +19,7 @@ import {
 	utimesSync,
 	writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { MacFiles } from "../../src/install/macos/macFiles";
 import { SystemFiles } from "../../src/install/systemFiles";
 import { WindowsFiles } from "../../src/install/windows/windowsFiles";
@@ -52,6 +52,42 @@ async function run(argv: string[]) {
 		new Response(child.stderr).text(),
 	]);
 	return { code, out: stdout + stderr };
+}
+
+/** For a service that didn't connect: what the service manager and the agent's log say. */
+async function printDiagnostics() {
+	const config = AppConstants.DEFAULT_CONFIG_PATH;
+	const show = async (argv: string[]) => {
+		const result = await run(argv);
+		console.log(`\n$ ${argv.join(" ")} (exit ${result.code})\n${result.out.trim()}`);
+	};
+
+	if (Platform.isLinux()) {
+		await show(["journalctl", "-u", AppConstants.SERVICE_NAME, "-n", "40", "--no-pager"]);
+	} else if (Platform.isMac()) {
+		await show(["launchctl", "print", `system/${MacFiles.LABEL}`]);
+	} else {
+		await show(["schtasks", "/Query", "/TN", WindowsFiles.TASK_NAME, "/V", "/FO", "LIST"]);
+	}
+
+	// Every folder on the way to the config and the log: the service user must pass through all.
+	if (Platform.isMac()) {
+		const paths = new Set<string>();
+		for (const target of [config, MacFiles.logFile()]) {
+			for (let path = target; path !== "/"; path = dirname(path)) paths.add(path);
+		}
+		await show(["ls", "-ld", ...[...paths].sort()]);
+	}
+
+	const log = Platform.isWindows()
+		? WindowsFiles.logFile(config)
+		: Platform.isMac()
+			? MacFiles.logFile()
+			: null;
+	if (log) {
+		const text = existsSync(log) ? readFileSync(log, "utf8") : "(no log file)";
+		console.log(`\n${log}:\n${text.trim().split("\n").slice(-40).join("\n")}`);
+	}
 }
 
 async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs: number) {
@@ -88,6 +124,7 @@ check("install", install.code === 0, install.out);
 
 const connection = await fake.waitForConnection(0, 30_000).catch(() => null);
 check("the service connected to the server", connection !== null);
+if (!connection) await printDiagnostics();
 if (connection) {
 	const hello = await connection.hello();
 	check(`HELLO as kind ${AppConstants.AGENT_KIND}`, hello.kind === AppConstants.AGENT_KIND, hello);
@@ -198,8 +235,14 @@ if (Platform.isWindows()) {
 }
 
 // --- uninstall -----------------------------------------------------------------------------------
-const uninstall = await run([binary, "uninstall", "--purge"]);
+// Through the installed binary, as the docs say (on Windows it can't delete itself while running).
+const uninstall = await run([AppConstants.INSTALL_BINARY_PATH, "uninstall", "--purge"]);
 check("uninstall --purge", uninstall.code === 0, uninstall.out);
+check(
+	"the binary is gone",
+	await waitFor(() => !existsSync(AppConstants.INSTALL_BINARY_PATH), 15_000),
+	AppConstants.INSTALL_BINARY_PATH,
+);
 check("the config is gone", !existsSync(AppConstants.DEFAULT_CONFIG_PATH));
 if (Platform.isLinux()) {
 	const left = [SystemFiles.UNIT_PATH, ...SystemFiles.powerUnitPaths()].filter((path) =>
@@ -229,6 +272,12 @@ if (Platform.isWindows()) {
 	check(
 		"the task is gone",
 		(await run(["schtasks", "/Query", "/TN", WindowsFiles.TASK_NAME])).code !== 0,
+	);
+	const programDir = dirname(AppConstants.INSTALL_BINARY_PATH);
+	check(
+		"the program folder is gone",
+		await waitFor(() => !existsSync(programDir), 15_000),
+		existsSync(programDir) ? readdirSync(programDir) : undefined,
 	);
 }
 

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { chmod, copyFile, mkdir, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
-import { win32 } from "node:path";
+import { dirname, win32 } from "node:path";
 import { AppError } from "../utils/errors";
 import { Logger } from "../utils/logger";
 import { Platform } from "../utils/platform";
@@ -66,7 +66,10 @@ export class PlanRunner {
 				try {
 					await stat(step.path);
 				} catch {
-					await mkdir(step.path, { recursive: true, mode: step.mode });
+					// Missing parents (/usr/local/var/log on a new Mac) get 0755: the step's mode is for
+					// the directory itself, and the service user must pass through the parents.
+					await mkdir(dirname(step.path), { recursive: true, mode: 0o755 });
+					await mkdir(step.path, { mode: step.mode });
 				}
 				return;
 
