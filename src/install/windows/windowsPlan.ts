@@ -1,6 +1,9 @@
+import { tmpdir } from "node:os";
 import { win32 } from "node:path";
 import type { InstallPlan } from "../installPlan";
+import type { WindowsFacts } from "./windowsFacts";
 import { WindowsFiles } from "./windowsFiles";
+import { WindowsPolicy } from "./windowsPolicy";
 
 /** What `install` and `uninstall` do on Windows, as steps for the PlanRunner. */
 export class WindowsPlan {
@@ -37,6 +40,7 @@ export class WindowsPlan {
 			{ type: "run", argv: ["schtasks", "/End", "/TN", task], ignoreFailure: true },
 			{ type: "run", argv: ["schtasks", "/Run", "/TN", task] },
 		);
+		steps.push(...WindowsPlan.shutdownRight(options.policy, "add"));
 		return steps;
 	}
 
@@ -66,7 +70,39 @@ export class WindowsPlan {
 				ignoreFailure: true,
 			});
 		}
+		steps.push(...WindowsPlan.shutdownRight(options.policy, "remove"));
 		return steps;
+	}
+
+	/**
+	 * Grants (`mode: "add"`) or takes back (`remove`) LOCAL SERVICE's right to shut the machine
+	 * down: secedit exports the local policy, the plan rewrites the `SeShutdownPrivilege` line and
+	 * secedit applies the file. Without facts (`--dry-run` as a non-admin, or a failed export)
+	 * there are no steps.
+	 */
+	private static shutdownRight(
+		policy: WindowsFacts.Policy | null | undefined,
+		mode: "add" | "remove",
+	): InstallPlan.Step[] {
+		const changed = !policy
+			? null
+			: mode === "add"
+				? WindowsPolicy.merge(policy.text)
+				: WindowsPolicy.split(policy.text);
+		if (changed === null) return [];
+
+		const base = win32.join(tmpdir(), `netignite-secedit-${process.pid}`);
+		const inf = `${base}.inf`;
+		const db = `${base}.sdb`;
+		return [
+			{ type: "remove", path: inf },
+			{ type: "remove", path: db },
+			{ type: "run", argv: ["secedit", "/export", "/cfg", inf] },
+			{ type: "write", path: inf, content: changed, mode: 0o600, encoding: policy?.encoding },
+			{ type: "run", argv: ["secedit", "/configure", "/db", db, "/cfg", inf, "/quiet"] },
+			{ type: "remove", path: inf },
+			{ type: "remove", path: db },
+		];
 	}
 
 	/** After `pair`: restart a running agent with the new credential. */
@@ -85,11 +121,15 @@ export namespace WindowsPlan {
 		/** Where the task runs it from. */
 		binaryTarget: string;
 		configPath: string;
+		/** The exported local policy; without it the shutdown right isn't touched. */
+		policy?: WindowsFacts.Policy | null;
 	};
 
 	export type UninstallOptions = {
 		binaryTarget: string;
 		configPath: string;
 		purge: boolean;
+		/** The exported local policy; without it the shutdown right isn't touched. */
+		policy?: WindowsFacts.Policy | null;
 	};
 }

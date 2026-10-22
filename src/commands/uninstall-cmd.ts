@@ -4,6 +4,7 @@ import { MacFacts } from "../install/macos/macFacts";
 import { MacPlan } from "../install/macos/macPlan";
 import { PlanRunner } from "../install/planRunner";
 import { SystemFacts } from "../install/systemFacts";
+import { WindowsFacts } from "../install/windows/windowsFacts";
 import { WindowsPlan } from "../install/windows/windowsPlan";
 import { CommandFlags, serviceConfigPath } from "../utils/commandFlags";
 import { AppConstants } from "../utils/constants";
@@ -55,7 +56,13 @@ export class UninstallCMD extends CLIBaseCommand<typeof ARGS> {
 		const binaryTarget = AppConstants.INSTALL_BINARY_PATH;
 		let steps: InstallPlan.Step[];
 		if (Platform.isWindows()) {
-			steps = WindowsPlan.uninstall({ binaryTarget, configPath, purge });
+			// Best effort: without the policy (e.g. a non-admin --dry-run), the shutdown right stays.
+			steps = WindowsPlan.uninstall({
+				binaryTarget,
+				configPath,
+				purge,
+				policy: (await WindowsFacts.policy()) ?? undefined,
+			});
 		} else if (Platform.isMac()) {
 			steps = MacPlan.uninstall({ binaryTarget, configPath, purge, facts: await MacFacts.gather() });
 		} else {

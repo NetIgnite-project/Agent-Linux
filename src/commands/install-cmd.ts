@@ -6,8 +6,10 @@ import { MacFiles } from "../install/macos/macFiles";
 import { MacPlan } from "../install/macos/macPlan";
 import { PlanRunner } from "../install/planRunner";
 import { SystemFacts } from "../install/systemFacts";
+import { WindowsFacts } from "../install/windows/windowsFacts";
 import { WindowsFiles } from "../install/windows/windowsFiles";
 import { WindowsPlan } from "../install/windows/windowsPlan";
+import { WindowsPolicy } from "../install/windows/windowsPolicy";
 import { CommandFlags, serviceConfigPath } from "../utils/commandFlags";
 import { AppConstants } from "../utils/constants";
 import { AppError, reportError } from "../utils/errors";
@@ -135,10 +137,19 @@ export class InstallCMD extends CLIBaseCommand<typeof ARGS> {
 	}
 
 	private static async installWindows(configPath: string, dryRun: boolean) {
+		// secedit needs an administrator; and without the local policy the plan can't grant the
+		// shutdown right, which shutdown.exe needs.
+		const policy = await WindowsFacts.policy();
+		if (!dryRun && !policy) {
+			throw new AppError(
+				"secedit couldn't export the local security policy, so the agent's account can't be granted the right to shut this machine down",
+			);
+		}
 		const steps = WindowsPlan.install({
 			binarySource: process.execPath,
 			binaryTarget: AppConstants.INSTALL_BINARY_PATH,
 			configPath,
+			policy,
 		});
 
 		await PlanRunner.run(steps, { dryRun });
@@ -147,6 +158,11 @@ export class InstallCMD extends CLIBaseCommand<typeof ARGS> {
 		Logger.info(
 			`Installed: the scheduled task "${WindowsFiles.TASK_NAME}" runs the agent as LOCAL SERVICE whenever Windows starts.`,
 		);
+		if (policy && policy.text !== WindowsPolicy.merge(policy.text)) {
+			Logger.info(
+				"Granted LOCAL SERVICE the right to shut this machine down (uninstall takes it back).",
+			);
+		}
 		Logger.info(
 			`Check it with: ${AppConstants.BINARY_NAME} status  /  log: ${WindowsFiles.logFile(configPath)}`,
 		);

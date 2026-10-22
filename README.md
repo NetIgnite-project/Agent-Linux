@@ -89,12 +89,14 @@ and Administrators (below ProgramData every user may read otherwise). `install`:
 - copies the binary to `C:\Program Files\NetIgnite\netignite-agent.exe`,
 - gives the account `LOCAL SERVICE` read access to the config folder and write access to its
   `logs` folder (by SID, so translated account names don't matter),
+- grants `LOCAL SERVICE` the right to shut the PC down (via `secedit`; `uninstall` takes it back),
 - registers the scheduled task **NetIgnite Agent**: started at boot as `LOCAL SERVICE`, restarted
   once a minute if it stops, no time limit, also on battery,
 - starts it.
 
-`LOCAL SERVICE` has no rights to your files or the system, but it may shut the PC down, so the
-agent runs `shutdown.exe /s|/r /t 0 /d p:0:0` itself; there is nothing else it can run. It logs to
+`LOCAL SERVICE` has no rights to your files or the system; the only extra right `install` gives
+it is to shut the PC down, so the agent runs `shutdown.exe /s|/r /t 0 /d p:0:0` itself; there is
+nothing else it can run. It logs to
 `C:\ProgramData\NetIgnite\logs\agent.log` (1 MB, then `agent.log.1`). `netignite-agent status`
 shows the task's state, `uninstall [--purge]` removes it again. Wake-on-LAN mode isn't available
 on Windows.

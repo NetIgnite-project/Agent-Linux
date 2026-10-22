@@ -27,6 +27,9 @@ SSH and the Windows and macOS agents need the NetIgnite server release after 2.0
 - SSH is only offered over an `https://` server address, and the agent makes at most 10 SSH
   logins a minute. Pairing again keeps the SSH keys. A config with an unusable SSH key still
   loads (without SSH); `install`, `pair` or `wol-mode on` create new keys.
+- Windows: `install` grants the `LOCAL SERVICE` account the right to shut the machine down (via
+  `secedit`; Windows doesn't grant it to that account itself), `uninstall` takes it back — the
+  Windows way of the polkit rule this release replaces on Linux.
 - `run --log-file <path>`: also log to a file (1 MB, then one `.1`); the Windows task and the macOS
   daemon use it.
 - `status` no longer waits 5 seconds after the credential check before it exits.

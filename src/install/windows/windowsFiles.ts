@@ -5,8 +5,9 @@ import { AppError } from "../../utils/errors";
 
 /**
  * Windows: the agent runs as a scheduled task started at boot, as `LOCAL SERVICE`. That account
- * has no rights to the user's files or the system, but it may shut the machine down
- * (SeShutdownPrivilege), so the agent runs `shutdown.exe` itself; there is no helper to ask.
+ * has no rights to the user's files or the system, and no right to shut the machine down either
+ * (which `shutdown.exe` needs) — `install` grants it via the local security policy, see
+ * {@link WindowsPolicy}.
  *
  * Accounts are named by their well-known SIDs: the names are translated (German Windows calls
  * `LOCAL SERVICE` "LOKALER DIENST").
