@@ -30,6 +30,9 @@ SSH and the Windows and macOS agents need the NetIgnite server release after 2.0
 - Windows: `install` grants the `LOCAL SERVICE` account the right to shut the machine down (via
   `secedit`; Windows doesn't grant it to that account itself), `uninstall` takes it back — the
   Windows way of the polkit rule this release replaces on Linux.
+- Windows: `pair` restricts the config folder it creates to SYSTEM, Administrators and the
+  account running it, so other local users can't read the secret before `install` applies the
+  agent's access rights.
 - `run --log-file <path>`: also log to a file (1 MB, then one `.1`); the Windows task and the macOS
   daemon use it.
 - `status` no longer waits 5 seconds after the credential check before it exits.

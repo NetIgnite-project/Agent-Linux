@@ -309,6 +309,11 @@ describe("SSH requests", () => {
 		expect(hello.ssh_keys).toEqual(publicKeys);
 		const helloText = JSON.stringify(connection.frames.map((entry) => entry.frame));
 		expect(helloText).not.toContain("PRIVATE KEY");
+		// Not even a stray base64 body of a private key line (the header isn't the only giveaway).
+		for (const line of Object.values(keys).flatMap((key) => key.split("\n"))) {
+			const body = line.replace(/^-+(BEGIN|END)[^-]*-+$/, "").trim();
+			if (body.length > 40) expect(helloText).not.toContain(body);
+		}
 	});
 
 	test("SSH_CHECK: trust on first use, then a check against the stored key", async () => {

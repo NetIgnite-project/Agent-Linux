@@ -6,6 +6,7 @@ import { ServerUrl } from "../net/serverUrl";
 import { SshKeys } from "../ssh/sshKeys";
 import { AppConstants } from "../utils/constants";
 import { AppError } from "../utils/errors";
+import { Logger } from "../utils/logger";
 import { Platform } from "../utils/platform";
 
 /**
@@ -145,9 +146,10 @@ export class AgentConfig {
 	}
 
 	/**
-	 * Creates the config directory (0750); the service user's group may enter it. On Windows (as an
-	 * administrator) it is restricted to SYSTEM and Administrators before anything is written into
-	 * it: below ProgramData every user may read otherwise. `install` adds read access for the agent.
+	 * Creates the config directory (0750); the service user's group may enter it. On Windows it is
+	 * restricted to SYSTEM, Administrators and the creating account — also for a non-admin `pair`
+	 * (the creator may set the ACL): below ProgramData every user may read otherwise. `install`
+	 * replaces this with read access for the agent.
 	 */
 	private static async ensureDir(dir: string, serviceUser: AgentConfig.Owner | null) {
 		if (await Platform.exists(dir)) return;
@@ -156,15 +158,24 @@ export class AgentConfig {
 		await mkdir(dir, { mode: AgentConfig.DIR_MODE });
 		await chmod(dir, AgentConfig.DIR_MODE);
 		if (serviceUser) await chown(dir, 0, serviceUser.gid);
-		if (Platform.isWindows() && Platform.isAdmin()) {
-			const icacls = Bun.spawnSync(WindowsFiles.configAclAdminsOnly(dir), {
-				stdout: "ignore",
-				stderr: "pipe",
-			});
-			if (icacls.exitCode !== 0) {
-				throw new ConfigError(`Can't restrict access to ${dir}: ${icacls.stderr.toString().trim()}`);
-			}
+		if (!Platform.isWindows()) return;
+
+		const creatorSid = await WindowsFiles.currentSid();
+		const icacls = Bun.spawnSync(WindowsFiles.configAclAdminsOnly(dir, creatorSid ?? undefined), {
+			stdout: "ignore",
+			stderr: "pipe",
+		});
+		if (icacls.exitCode === 0) return;
+		// A failure leaves the secret readable: fatal when elevated (the ACL is what lets LOCAL
+		// SERVICE work at all), a warning otherwise.
+		const reason = icacls.stderr.toString().trim();
+		if (Platform.isAdmin()) {
+			throw new ConfigError(`Can't restrict access to ${dir}: ${reason}`);
 		}
+		Logger.warn(
+			`Couldn't restrict access to ${dir} (${reason}). Other local users can read the agent's ` +
+				"secret until install runs as an administrator.",
+		);
 	}
 
 	/**

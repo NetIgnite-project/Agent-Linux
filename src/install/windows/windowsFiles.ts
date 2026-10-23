@@ -21,6 +21,9 @@ export class WindowsFiles {
 		administrators: "S-1-5-32-544",
 	} as const;
 
+	/** The current process's user SID, asked for once (see {@link currentSid}). */
+	private static sid: Promise<string | null> | null = null;
+
 	static configDir(configPath: string) {
 		return win32.dirname(configPath);
 	}
@@ -114,10 +117,14 @@ export class WindowsFiles {
 		];
 	}
 
-	/** The same without the agent: before `install` and after `uninstall`. */
-	static configAclAdminsOnly(configDir: string) {
+	/**
+	 * The same without the agent, plus a grant for `creatorSid`: what `pair` sets for the folder it
+	 * just created, so the secret is readable only for SYSTEM, Administrators and the account that
+	 * runs the agent setup (until `install` replaces this with {@link configAcl}).
+	 */
+	static configAclAdminsOnly(configDir: string, creatorSid?: string) {
 		const { system, administrators } = WindowsFiles.SID;
-		return [
+		const argv = [
 			"icacls",
 			configDir,
 			"/inheritance:r",
@@ -125,6 +132,32 @@ export class WindowsFiles {
 			`*${system}:(OI)(CI)F`,
 			`*${administrators}:(OI)(CI)F`,
 		];
+		if (creatorSid) argv.push(`*${creatorSid}:(OI)(CI)F`);
+		return argv;
+	}
+
+	/** The current user's SID (`whoami`), or null if it can't be determined. Memoized. */
+	static async currentSid(): Promise<string | null> {
+		WindowsFiles.sid ??= (async () => {
+			try {
+				const child = Bun.spawn(
+					[
+						"powershell.exe",
+						"-NoProfile",
+						"-NonInteractive",
+						"-Command",
+						"[Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+					],
+					{ stdin: "ignore", stdout: "pipe", stderr: "ignore" },
+				);
+				const [code, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
+				const sid = stdout.trim();
+				return code === 0 && /^S-1-[0-9-]+$/.test(sid) ? sid : null;
+			} catch {
+				return null;
+			}
+		})();
+		return WindowsFiles.sid;
 	}
 
 	/** The agent may write its log (and nothing else). */
