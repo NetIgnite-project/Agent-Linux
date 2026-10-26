@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.0 (2026-10-26)
 
 SSH and the Windows and macOS agents need the NetIgnite server release after 2.0.0. With server
 2.0.0, the Linux agent works as before, but without SSH.
