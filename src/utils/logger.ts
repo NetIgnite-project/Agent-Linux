@@ -48,6 +48,12 @@ export class Logger {
 	 */
 	static setFile(path: string | null, maxBytes = 1024 * 1024) {
 		this.logFile = path ? { path, maxBytes } : null;
+		// A restarted agent appends to the file it wrote before: count from its size.
+		try {
+			this.logFileBytes = path && existsSync(path) ? statSync(path).size : 0;
+		} catch {
+			this.logFileBytes = 0;
+		}
 	}
 
 	private static record(level: string, args: unknown[]) {
@@ -59,12 +65,18 @@ export class Logger {
 		if (this.logFile) this.writeFile(this.logFile, line);
 	}
 
+	/** Bytes in the log file, kept in memory: a stat per line would show up in a months-long run. */
+	private static logFileBytes = 0;
+
 	private static writeFile(file: { path: string; maxBytes: number }, line: string) {
 		try {
-			if (existsSync(file.path) && statSync(file.path).size > file.maxBytes) {
-				renameSync(file.path, `${file.path}.1`);
+			if (this.logFileBytes > file.maxBytes) {
+				// The counter only knows what this process wrote: if the file is gone, start over.
+				if (existsSync(file.path)) renameSync(file.path, `${file.path}.1`);
+				this.logFileBytes = 0;
 			}
 			appendFileSync(file.path, `${line}\n`);
+			this.logFileBytes += Buffer.byteLength(line) + 1;
 		} catch {
 			// The log file is a convenience; never fail because of it.
 		}

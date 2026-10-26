@@ -75,7 +75,7 @@ describe("pair", () => {
 		expect((await stat(path)).mode & 0o777).toBe(0o600);
 	});
 
-	test("creates the agent's SSH keys, and pairing again keeps them", async () => {
+	linuxOnly("creates the agent's SSH keys, and pairing again keeps them", async () => {
 		const { path } = await pairNew("pair-keys", 16);
 		const first = await AgentConfig.load(path);
 		expect(first.ssh_keys).toBeDefined();
@@ -89,11 +89,31 @@ describe("pair", () => {
 		expect(second.ssh_keys).toEqual(first.ssh_keys);
 	});
 
-	test("--wol turns on Wake-on-LAN mode", async () => {
+	// The keys exist for Wake-on-LAN mode's SSH logins, which need Linux.
+	test.skipIf(process.platform === "linux")(
+		"no SSH keys where Wake-on-LAN mode can't run",
+		async () => {
+			const { path } = await pairNew("pair-keys-elsewhere", 18);
+			expect((await AgentConfig.load(path)).ssh_keys).toBeUndefined();
+		},
+	);
+
+	linuxOnly("--wol turns on Wake-on-LAN mode", async () => {
 		const { path, result } = await pairNew("pair-wol", 14, ["--wol"]);
 		expect(result.exitCode).toBe(0);
 		expect((await AgentConfig.load(path)).wol.enabled).toBe(true);
 	});
+
+	// The config says what the machine runs, not what was asked for.
+	test.skipIf(process.platform === "linux")(
+		"--wol stays off where Wake-on-LAN mode can't run",
+		async () => {
+			const { path, result } = await pairNew("pair-wol-elsewhere", 19, ["--wol"]);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toContain("Wake-on-LAN mode needs Linux");
+			expect((await AgentConfig.load(path)).wol.enabled).toBe(false);
+		},
+	);
 
 	test("an ESP32 token fails clearly and writes nothing", async () => {
 		const token = server.addEnrollment(15, "esp32");

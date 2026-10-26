@@ -24,39 +24,55 @@ export class HostControl {
 	/** How long the `.path` unit gets to pick a request up before it counts as failed. */
 	static readonly PICKUP_TIMEOUT_MS = 5000;
 
+	/** launchctl's exit status for a service it doesn't know ("Could not find service"). */
+	private static readonly LAUNCHCTL_NO_SUCH_SERVICE = 113;
+
 	/**
-	 * Whether the action can happen right now: its `.path` unit is active and no block inhibitor
-	 * (a running package upgrade, for example) stops shutdowns. Returns why not, or null if it can
-	 * or that can't be told (no systemctl or busctl, or no D-Bus to ask through). The server gets
-	 * this answer; the action itself runs only after answering.
+	 * Whether the action can happen right now: on macOS its request directory exists and its root
+	 * daemon is loaded, on Linux its `.path` unit is active and no block inhibitor (a running
+	 * package upgrade, for example) stops shutdowns. Returns why not, or null if it can or that
+	 * can't be told (no launchctl, systemctl or busctl, or no D-Bus to ask through). The server
+	 * gets this answer; the action itself runs only after answering.
 	 */
 	static async check(action: HostControl.Action): Promise<string | null> {
 		if (Platform.isWindows()) return null;
 		if (Platform.isMac()) {
 			const dir = MacFiles.requestDir(action);
-			return (await HostControl.exists(dir))
-				? null
-				: HostControl.notSetUp(action, `${dir} is missing`);
+			if (!(await HostControl.exists(dir))) {
+				return HostControl.notSetUp(action, `${dir} is missing`);
+			}
+			// A directory without its daemon (booted out, a partial uninstall) can't pick a request
+			// up either. Only launchctl's "no such service" counts: any other failure can't tell.
+			const label = `system/${MacFiles.powerLabel(action)}`;
+			const status = await HostControl.exitStatus(["launchctl", "print", label]);
+			return status === HostControl.LAUNCHCTL_NO_SUCH_SERVICE
+				? HostControl.notSetUp(action, `${label} isn't loaded`)
+				: null;
 		}
 
 		const unit = `${SystemFiles.powerUnitName(action)}.path`;
-		// Prints the state (also for a unit that doesn't exist: "inactive"); nothing if it can't ask.
-		const state = (await HostControl.output(["systemctl", "is-active", unit]))?.trim();
+		// Prints the state (also for a unit that doesn't exist: "inactive"); nothing if it can't
+		// ask. The probes are independent, so both run at once; the inhibitor answer is dropped
+		// when the unit isn't active.
+		const [unitState, inhibitors] = await Promise.all([
+			HostControl.output(["systemctl", "is-active", unit]),
+			HostControl.output(
+				[
+					"busctl",
+					"--system",
+					"--json=short",
+					"call",
+					"org.freedesktop.login1",
+					"/org/freedesktop/login1",
+					"org.freedesktop.login1.Manager",
+					"ListInhibitors",
+				],
+				{ requireSuccess: true },
+			),
+		]);
+		const state = unitState?.trim();
 		if (state && state !== "active") return HostControl.notSetUp(action, `${unit} is ${state}`);
 
-		const inhibitors = await HostControl.output(
-			[
-				"busctl",
-				"--system",
-				"--json=short",
-				"call",
-				"org.freedesktop.login1",
-				"/org/freedesktop/login1",
-				"org.freedesktop.login1.Manager",
-				"ListInhibitors",
-			],
-			{ requireSuccess: true },
-		);
 		const blocker = inhibitors === null ? null : HostControl.blockingInhibitor(inhibitors);
 		if (blocker) {
 			return `${blocker.who} blocks shutdown and reboot right now${blocker.why ? ` (${blocker.why})` : ""}`;
@@ -88,20 +104,26 @@ export class HostControl {
 	}
 
 	/**
-	 * Linux and macOS: creates the action's request file and waits until the root unit picked it up
-	 * (deleted it). If nothing does, removes the file again, so that it can't fire later, and
+	 * Linux and macOS: creates the action's request file and waits until the root unit picked it
+	 * up (deleted it). If nothing does, removes the file again, so that it can't fire later, and
 	 * throws. Windows: runs `shutdown.exe`.
 	 */
-	static async perform(
-		action: HostControl.Action,
-		options: { requestPath?: string; timeoutMs?: number } = {},
-	) {
-		if (Platform.isWindows() && !options.requestPath) return await HostControl.runShutdownExe(action);
+	static async perform(action: HostControl.Action) {
+		if (Platform.isWindows()) return await HostControl.runShutdownExe(action);
+		const path = Platform.isMac() ? MacFiles.requestPath(action) : SystemFiles.requestPath(action);
+		return await HostControl.requestViaFile(action, path);
+	}
 
-		const path =
-			options.requestPath ??
-			(Platform.isMac() ? MacFiles.requestPath(action) : SystemFiles.requestPath(action));
-		const timeoutMs = options.timeoutMs ?? HostControl.PICKUP_TIMEOUT_MS;
+	/**
+	 * The file-asking half of {@link perform}, with the request path (and timeout) as parameters,
+	 * so tests can point it at a directory of their own. The path has to be one a root unit
+	 * watches: a request nobody picks up only times out.
+	 */
+	static async requestViaFile(
+		action: HostControl.Action,
+		path: string,
+		timeoutMs: number = HostControl.PICKUP_TIMEOUT_MS,
+	) {
 		Logger.warn(`Host control: ${action} requested by the server, asking the system (${path})`);
 
 		try {
@@ -150,6 +172,15 @@ export class HostControl {
 			const [exitCode, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
 			if (options.requireSuccess && exitCode !== 0) return null;
 			return stdout;
+		} catch {
+			return null;
+		}
+	}
+
+	/** Exit status of a command whose output doesn't matter, or null if it can't run. */
+	private static async exitStatus(argv: string[]) {
+		try {
+			return await Bun.spawn(argv, { stdin: "ignore", stdout: "ignore", stderr: "ignore" }).exited;
 		} catch {
 			return null;
 		}

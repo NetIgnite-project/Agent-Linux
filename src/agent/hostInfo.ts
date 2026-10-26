@@ -62,15 +62,7 @@ export class HostInfo {
 	/** Linux: os-release. macOS: `sw_vers` (macOS 15.1). Windows: the edition (Windows 11 Pro). */
 	static async readOsName() {
 		if (Platform.isWindows()) return version() || null;
-		if (Platform.isMac()) {
-			try {
-				const child = Bun.spawn(["sw_vers", "-productVersion"], { stdout: "pipe", stderr: "ignore" });
-				const productVersion = (await new Response(child.stdout).text()).trim();
-				return productVersion ? `macOS ${productVersion}` : "macOS";
-			} catch {
-				return "macOS";
-			}
-		}
+		if (Platform.isMac()) return HostInfo.macOsName();
 		for (const path of HostInfo.OS_RELEASE_FILES) {
 			try {
 				return HostInfo.osName(HostInfo.parseOsRelease(await readFile(path, "utf8")));
@@ -79,6 +71,22 @@ export class HostInfo {
 			}
 		}
 		return null;
+	}
+
+	/** `sw_vers` once per process: HELLO asks on every connect, the version can't change while it runs. */
+	private static macOsNamePromise: Promise<string> | null = null;
+
+	private static macOsName() {
+		HostInfo.macOsNamePromise ??= (async () => {
+			try {
+				const child = Bun.spawn(["sw_vers", "-productVersion"], { stdout: "pipe", stderr: "ignore" });
+				const productVersion = (await new Response(child.stdout).text()).trim();
+				return productVersion ? `macOS ${productVersion}` : "macOS";
+			} catch {
+				return "macOS";
+			}
+		})();
+		return HostInfo.macOsNamePromise;
 	}
 
 	/** The HELLO `info`: shown as key/value pairs in the dashboard. */

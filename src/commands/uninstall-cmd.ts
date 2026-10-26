@@ -64,7 +64,12 @@ export class UninstallCMD extends CLIBaseCommand<typeof ARGS> {
 				policy: (await WindowsFacts.policy()) ?? undefined,
 			});
 		} else if (Platform.isMac()) {
-			steps = MacPlan.uninstall({ binaryTarget, configPath, purge, facts: await MacFacts.gather() });
+			steps = MacPlan.uninstall({
+				binaryTarget,
+				configPath,
+				purge,
+				facts: await MacFacts.existingIds(),
+			});
 		} else {
 			const user = AppConstants.SERVICE_USER;
 			const facts = Platform.isLinux() ? await SystemFacts.gather(user) : { userExists: true };

@@ -98,8 +98,9 @@ and Administrators (below ProgramData every user may read otherwise). `install`:
 it is to shut the PC down, so the agent runs `shutdown.exe /s|/r /t 0 /d p:0:0` itself; there is
 nothing else it can run. It logs to
 `C:\ProgramData\NetIgnite\logs\agent.log` (1 MB, then `agent.log.1`). `netignite-agent status`
-shows the task's state, `uninstall [--purge]` removes it again. Wake-on-LAN mode isn't available
-on Windows.
+shows the task's state, `uninstall [--purge]` removes it again; without `--purge` the config stays,
+readable for SYSTEM and Administrators only (`LOCAL SERVICE` loses its access). Wake-on-LAN mode
+isn't available on Windows: `pair --wol` warns and stores host mode, `wol-mode on` refuses.
 
 ## macOS
 
@@ -126,8 +127,11 @@ The config is `/usr/local/etc/netignite/agent.json`. `install`:
 Shutdown and reboot work like on Linux: the agent has no right to either. It creates a file in its
 request folder; the root daemon for that action (launchd `QueueDirectories`) empties the folder
 and runs `/sbin/shutdown -h now` (or `-r now`) if the request is less than a minute old. Older
-requests (a power cut right after one, say) are only removed. The agent logs to
-`/usr/local/var/log/netignite-agent/agent.log`. Wake-on-LAN mode isn't available on macOS.
+requests (a power cut right after one, say) are only removed. Before it answers a shutdown or
+reboot request, the agent checks that the request folder exists and launchd has the root daemon
+loaded; if not, the dashboard says to run `install` again. The agent logs to
+`/usr/local/var/log/netignite-agent/agent.log`. Wake-on-LAN mode isn't available on macOS:
+`pair --wol` warns and stores host mode, `wol-mode on` refuses.
 
 The binaries aren't signed by Apple. macOS only runs Apple silicon binaries with a signature, so
 the install script signs the downloaded file ad hoc (`codesign --force --sign -`) after checking it
@@ -180,8 +184,9 @@ Server). The server's admin has to turn SSH on (Server Settings), and the agent 
 (capability `ssh.power`) over an `https://` server address. Host mode never does SSH: it only
 controls its own machine.
 
-**The agent's own keys.** `pair` (and `install` or `wol-mode on` for older configs) creates two
-Ed25519 key pairs, one for shutdown and one for reboot, in `/etc/netignite/agent.json`. The
+**The agent's own keys.** On Linux, `pair` (and `install` or `wol-mode on` for older configs)
+creates two Ed25519 key pairs, one for shutdown and one for reboot, in `/etc/netignite/agent.json`
+(Windows and macOS have no Wake-on-LAN mode, so no keys). The
 private keys never leave the machine; HELLO reports the public keys (`ssh_keys`), and the
 dashboard turns them into two `authorized_keys` lines for the device, each with its forced
 command. There are no passwords and no credentials from the server: requests only say where to

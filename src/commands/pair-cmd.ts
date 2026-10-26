@@ -88,10 +88,12 @@ export class PairCMD extends CLIBaseCommand<typeof ARGS> {
 		// The token works once: make sure the result can be stored before spending it.
 		await AgentConfig.assertWritable(configPath);
 
-		const wol = wolFlag || (previous?.wol.enabled ?? false);
-		if (wol && !Platform.isLinux()) {
+		const wantedWol = wolFlag || (previous?.wol.enabled ?? false);
+		if (wantedWol && !Platform.isLinux()) {
 			Logger.warn("Wake-on-LAN mode needs Linux; on this machine the agent runs in host mode.");
 		}
+		// Store only a mode this machine can run: a config that says otherwise would lie.
+		const wol = wantedWol && Platform.isLinux();
 		const privileged = Platform.isPrivileged();
 		const serviceUser =
 			privileged && Platform.isLinux()
@@ -105,15 +107,18 @@ export class PairCMD extends CLIBaseCommand<typeof ARGS> {
 		const result = await Enrollment.enroll(server, token, secret);
 
 		try {
-			// SSH keys survive pairing again, so devices that allow them keep working.
-			const { config } = AgentConfig.withSshKeys({
+			const pairing = {
 				server: server.toString(),
 				agent_id: result.agent_id,
 				token_id: result.token_id,
 				secret,
 				wol: { enabled: wol },
-				ssh_keys: previous?.ssh_keys,
-			});
+			};
+			// SSH keys survive pairing again, so devices that allow them keep working. Wake-on-LAN
+			// mode, their only user, needs Linux.
+			const { config } = Platform.isLinux()
+				? AgentConfig.withSshKeys({ ...pairing, ssh_keys: previous?.ssh_keys })
+				: { config: pairing };
 			await AgentConfig.save(configPath, config, { serviceUser });
 		} catch (error) {
 			const reason = error instanceof Error ? error.message : String(error);

@@ -583,7 +583,7 @@ describe("HostControl", () => {
 		expect(HostControl.blockingInhibitor('{"data":[]}')).toBeNull();
 	});
 
-	test("perform returns once the .path unit picked the request up", async () => {
+	test("perform's file half returns once the .path unit picked the request up", async () => {
 		const dir = await makeTempDir();
 		try {
 			const requestPath = join(dir, "shutdown");
@@ -592,25 +592,25 @@ describe("HostControl", () => {
 				while (!(await Bun.file(requestPath).exists())) await Bun.sleep(20);
 				await rm(requestPath);
 			})();
-			await HostControl.perform("shutdown", { requestPath, timeoutMs: 3000 });
+			await HostControl.requestViaFile("shutdown", requestPath, 3000);
 			await pickUp;
 		} finally {
 			await removeTempDir(dir);
 		}
 	});
 
-	test("perform fails and removes the request when nothing picks it up", async () => {
+	test("perform's file half fails and removes the request when nothing picks it up", async () => {
 		const dir = await makeTempDir();
 		try {
 			const requestPath = join(dir, "reboot");
-			await expect(HostControl.perform("reboot", { requestPath, timeoutMs: 300 })).rejects.toThrow(
+			await expect(HostControl.requestViaFile("reboot", requestPath, 300)).rejects.toThrow(
 				"nothing picked the request up",
 			);
 			// A request left behind would reboot the machine whenever the unit becomes active.
 			expect(await Bun.file(requestPath).exists()).toBe(false);
 
 			await expect(
-				HostControl.perform("reboot", { requestPath: join(dir, "missing", "reboot") }),
+				HostControl.requestViaFile("reboot", join(dir, "missing", "reboot")),
 			).rejects.toThrow("can't create");
 		} finally {
 			await removeTempDir(dir);
