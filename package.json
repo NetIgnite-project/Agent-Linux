@@ -1,6 +1,6 @@
 {
 	"name": "@netignite/agent-linux",
-	"version": "1.0.0",
+	"version": "1.1.0",
 	"private": true,
 	"type": "module",
 	"description": "NetIgnite Agent for Linux: lets a NetIgnite server check, shut down and reboot this machine, and optionally wake other devices on its network",
