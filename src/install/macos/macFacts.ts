@@ -5,16 +5,16 @@ import { MacPlan } from "./macPlan";
 /** Looks at the Mac (read-only) for `install`, `uninstall` and `status`. */
 export class MacFacts {
 	static async gather(): Promise<MacPlan.Facts> {
-		const user = MacFiles.SERVICE_USER;
-		const [userId, groupId, users, groups] = await Promise.all([
-			MacFacts.readId(`/Users/${user}`, "UniqueID"),
-			MacFacts.readId(`/Groups/${user}`, "PrimaryGroupID"),
+		const [{ userId, groupId }, users, groups] = await Promise.all([
+			MacFacts.existingIds(),
 			MacFacts.output(["dscl", ".", "-list", "/Users", "UniqueID"]),
 			MacFacts.output(["dscl", ".", "-list", "/Groups", "PrimaryGroupID"]),
 		]);
 		const freeId = MacPlan.freeId(users ?? "", groups ?? "");
 		if (freeId === null && (userId === null || groupId === null)) {
-			throw new AppError(`No free id in ${MacPlan.ID_RANGE.join("–")} for the user ${user}.`);
+			throw new AppError(
+				`No free id in ${MacPlan.ID_RANGE.join("–")} for the user ${MacFiles.SERVICE_USER}.`,
+			);
 		}
 		return { userId, groupId, freeId: freeId ?? MacPlan.ID_RANGE[0] };
 	}
@@ -27,6 +27,19 @@ export class MacFacts {
 			MacFacts.readId(`/Users/${user}`, "PrimaryGroupID"),
 		]);
 		return uid !== null && gid !== null ? { uid, gid } : null;
+	}
+
+	/**
+	 * Whether the agent's user and group exist, for `uninstall`: two `dscl` reads, not the two full
+	 * directory listings `gather()` needs to find a free id.
+	 */
+	static async existingIds() {
+		const user = MacFiles.SERVICE_USER;
+		const [userId, groupId] = await Promise.all([
+			MacFacts.readId(`/Users/${user}`, "UniqueID"),
+			MacFacts.readId(`/Groups/${user}`, "PrimaryGroupID"),
+		]);
+		return { userId, groupId };
 	}
 
 	/** `launchctl print` of the agent: `running`, or why not. */

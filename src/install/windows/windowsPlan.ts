@@ -63,10 +63,10 @@ export class WindowsPlan {
 		if (purge) {
 			steps.push({ type: "remove", path: configPath }, { type: "rmdir", path: configDir });
 		} else {
-			// The agent's account doesn't need the config anymore.
+			// The agent's account doesn't need the config anymore: its read access goes too.
 			steps.push({
 				type: "run",
-				argv: WindowsFiles.configAclAdminsOnly(configDir),
+				argv: WindowsFiles.configAclUninstall(configDir),
 				ignoreFailure: true,
 			});
 		}
@@ -76,9 +76,9 @@ export class WindowsPlan {
 
 	/**
 	 * Grants (`mode: "add"`) or takes back (`remove`) LOCAL SERVICE's right to shut the machine
-	 * down: secedit exports the local policy, the plan rewrites the `SeShutdownPrivilege` line and
-	 * secedit applies the file. Without facts (`--dry-run` as a non-admin, or a failed export)
-	 * there are no steps.
+	 * down: the plan rewrites the `SeShutdownPrivilege` line of the policy that the command
+	 * exported at its start ({@link WindowsFacts.policy}) and secedit applies the file. Without
+	 * facts (`--dry-run` as a non-admin, or a failed export) there are no steps.
 	 */
 	private static shutdownRight(
 		policy: WindowsFacts.Policy | null | undefined,
@@ -97,7 +97,6 @@ export class WindowsPlan {
 		return [
 			{ type: "remove", path: inf },
 			{ type: "remove", path: db },
-			{ type: "run", argv: ["secedit", "/export", "/cfg", inf] },
 			{ type: "write", path: inf, content: changed, mode: 0o600, encoding: policy?.encoding },
 			{ type: "run", argv: ["secedit", "/configure", "/db", db, "/cfg", inf, "/quiet"] },
 			{ type: "remove", path: inf },

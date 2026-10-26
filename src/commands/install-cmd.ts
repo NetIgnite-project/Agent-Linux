@@ -72,7 +72,10 @@ export class InstallCMD extends CLIBaseCommand<typeof ARGS> {
 			const loaded = await AgentConfig.load(configPath);
 			wol = loaded.wol.enabled;
 			// Configs from 1.0.0 and older have no SSH keys; the service can't write them itself.
-			const { config, created } = AgentConfig.withSshKeys(loaded);
+			// They exist for Wake-on-LAN mode's SSH logins, which need Linux.
+			const { config, created } = Platform.isLinux()
+				? AgentConfig.withSshKeys(loaded)
+				: { config: loaded, created: false };
 			if (created && !dryRun) {
 				await AgentConfig.save(configPath, config);
 				Logger.info("Created the agent's SSH keys (for shutdown and reboot of other devices).");
@@ -158,7 +161,8 @@ export class InstallCMD extends CLIBaseCommand<typeof ARGS> {
 		Logger.info(
 			`Installed: the scheduled task "${WindowsFiles.TASK_NAME}" runs the agent as LOCAL SERVICE whenever Windows starts.`,
 		);
-		if (policy && policy.text !== WindowsPolicy.merge(policy.text)) {
+		// Only when this run rewrites the policy; on a re-install the right is already granted.
+		if (policy && WindowsPolicy.merge(policy.text) !== null) {
 			Logger.info(
 				"Granted LOCAL SERVICE the right to shut this machine down (uninstall takes it back).",
 			);

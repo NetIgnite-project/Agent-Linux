@@ -6,9 +6,10 @@ SSH and the Windows and macOS agents need the NetIgnite server release after 2.0
 2.0.0, the Linux agent works as before, but without SSH.
 
 - **Windows and macOS.** The same agent now runs on Windows 10/11 and macOS (host mode: status,
-  shutdown, reboot; Wake-on-LAN mode stays Linux-only). Windows: a scheduled task started at boot
-  as `LOCAL SERVICE`, which runs `shutdown.exe` with fixed arguments; the config folder is
-  restricted to SYSTEM and Administrators (plus read for the agent). macOS: launchd daemons, the
+  shutdown, reboot; Wake-on-LAN mode stays Linux-only, so `pair --wol` there warns and stores host
+  mode, and there are no SSH keys). Windows: a scheduled task started at boot as `LOCAL SERVICE`,
+  which runs `shutdown.exe` with fixed arguments; the config folder is restricted to SYSTEM and
+  Administrators (plus read for the agent, which `uninstall` takes back). macOS: launchd daemons, the
   agent as the hidden user `_netignite`, which asks a root daemon per action (`QueueDirectories`)
   to run `/sbin/shutdown`, like the systemd units on Linux. New binaries
   `netignite-agent-windows-x64.exe`, `netignite-agent-macos-arm64` and `netignite-agent-macos-x64`.
@@ -19,8 +20,8 @@ SSH and the Windows and macOS agents need the NetIgnite server release after 2.0
   `systemctl poweroff` or `reboot`, and nothing else. Run `sudo netignite-agent install` again
   after updating; it also removes the old polkit rule.
 - **SSH with the agent's own keys.** The agent no longer gets passwords or private keys from the
-  server. `pair` (and `install` or `wol-mode on` for older configs) creates two Ed25519 key pairs
-  in the config, one for shutdown and one for reboot; HELLO reports only the public keys
+  server. On Linux, `pair` (and `install` or `wol-mode on` for older configs) creates two Ed25519
+  key pairs in the config, one for shutdown and one for reboot; HELLO reports only the public keys
   (`ssh_keys`), and the dashboard shows them as `authorized_keys` lines with forced commands.
   Requests are renamed: `SSH_EXEC` is now `SSH_POWER`, the capability `ssh` is now `ssh.power`.
   `SSH_CHECK` logs in with both keys and reports which ones the device accepts.

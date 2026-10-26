@@ -136,6 +136,19 @@ export class WindowsFiles {
 		return argv;
 	}
 
+	/**
+	 * What `uninstall` sets instead of a --purge: the admins-only ACL, and the read access that
+	 * {@link configAcl} granted the agent taken back. `/grant:r` of the other accounts wouldn't
+	 * remove that ACE, so the config would stay readable for every LOCAL SERVICE process.
+	 */
+	static configAclUninstall(configDir: string) {
+		return [
+			...WindowsFiles.configAclAdminsOnly(configDir),
+			"/remove:g",
+			`*${WindowsFiles.SID.localService}`,
+		];
+	}
+
 	/** The current user's SID (`whoami`), or null if it can't be determined. Memoized. */
 	static async currentSid(): Promise<string | null> {
 		WindowsFiles.sid ??= (async () => {

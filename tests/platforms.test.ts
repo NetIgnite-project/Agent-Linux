@@ -59,6 +59,12 @@ describe("Windows", () => {
 			"*S-1-5-19:(OI)(CI)RX",
 		]);
 		expect(WindowsFiles.configAclAdminsOnly("C:\\x").join(" ")).not.toContain("S-1-5-19");
+		// Uninstall takes the agent's read access back; /grant:r of the other accounts wouldn't.
+		expect(WindowsFiles.configAclUninstall("C:\\x")).toEqual([
+			...WindowsFiles.configAclAdminsOnly("C:\\x"),
+			"/remove:g",
+			"*S-1-5-19",
+		]);
 		expect(WindowsFiles.logAcl("C:\\x\\logs")).toEqual([
 			"icacls",
 			"C:\\x\\logs",
@@ -158,17 +164,16 @@ describe("Windows", () => {
 			configPath: options.configPath,
 			policy,
 		});
-		const exports = runArgv(plan).filter((command) => command.startsWith("secedit /export"));
-		expect(exports).toHaveLength(1);
-		const inf = exports[0]?.split(" ").at(-1) ?? "";
+		const write = plan.find((s) => s.type === "write" && s.path.endsWith(".inf"));
+		const inf = write?.type === "write" ? write.path : "";
 		expect(inf).toContain("netignite-secedit-");
-		const write = plan.find((s) => s.type === "write" && s.path === inf);
 		expect(write?.type === "write" ? write.content : null).toBe(
 			"[Privilege Rights]\r\nSeShutdownPrivilege = *S-1-5-32-544,*S-1-5-19",
 		);
-		expect(runArgv(plan)).toContain(
+		// The export happened before the plan (WindowsFacts.policy); the plan only applies the file.
+		expect(runArgv(plan).filter((command) => command.startsWith("secedit"))).toEqual([
 			`secedit /configure /db ${inf.replace(/\.inf$/, ".sdb")} /cfg ${inf} /quiet`,
-		);
+		]);
 
 		const takenBack = WindowsPlan.uninstall({
 			binaryTarget: options.binaryPath,
@@ -182,12 +187,14 @@ describe("Windows", () => {
 					"SeShutdownPrivilege = *S-1-5-32-544,*S-1-5-19",
 			},
 		});
-		const exportLines = runArgv(takenBack).filter((command) => command.startsWith("secedit /export"));
-		const unInf = exportLines[0]?.split(" ").at(-1) ?? "";
-		const unWrite = takenBack.find((s) => s.type === "write" && s.path === unInf);
+		const unWrite = takenBack.find((s) => s.type === "write" && s.path.endsWith(".inf"));
+		const unInf = unWrite?.type === "write" ? unWrite.path : "";
 		expect(unWrite?.type === "write" ? unWrite.content : null).toBe(
 			"[Privilege Rights]\r\nSeShutdownPrivilege = *S-1-5-32-544",
 		);
+		expect(runArgv(takenBack).filter((command) => command.startsWith("secedit"))).toEqual([
+			`secedit /configure /db ${unInf.replace(/\.inf$/, ".sdb")} /cfg ${unInf} /quiet`,
+		]);
 
 		// Without the exported policy (a non-admin --dry-run), the right isn't touched.
 		const noPolicy = WindowsPlan.install({
@@ -205,7 +212,9 @@ describe("Windows", () => {
 			purge: false,
 		});
 		expect(runArgv(kept)).toContain("schtasks /Delete /TN NetIgnite Agent /F");
+		// The agent's read access to the config goes too.
 		expect(runArgv(kept).at(-1)).toContain("/inheritance:r");
+		expect(runArgv(kept).at(-1)).toContain("/remove:g *S-1-5-19");
 		expect(kept).not.toContainEqual({ type: "remove", path: options.configPath });
 		const purged = WindowsPlan.uninstall({
 			binaryTarget: options.binaryPath,
